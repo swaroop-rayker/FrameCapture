@@ -1,0 +1,349 @@
+/* FrameCapture dark theme (SPEC.md §16.3).
+ *
+ * The palette below is §16.3's, verbatim. It is repeated here as literal values because
+ * QSS has no variables -- `theme/__init__.py` substitutes the `@name` tokens before this is
+ * applied, so the single source of truth is `theme/__init__.py::PALETTE` and this file reads as
+ * the spec does.
+ *
+ * §16.3's rules, and where each one lives:
+ *   - no pure black, no pure white ......... the palette; nothing here uses #000/#FFF
+ *   - 4 px corner radius, 1 px borders ..... every rule below
+ *   - no drop shadows, gradients, glass .... absent, deliberately
+ *   - focus rings on everything ............ the `:focus` blocks
+ *   - 120 ms ease-out on state changes ..... QSS cannot animate; `theme/__init__.py` documents
+ *                                            where Qt animations carry this instead
+ *   - the recording dot pulses; nothing else moves
+ */
+
+QWidget {
+    background-color: @bg-base;
+    color: @text-primary;
+    font-family: "Segoe UI Variable", "Inter", "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow,
+QDialog {
+    background-color: @bg-base;
+}
+
+/* ---- panels ------------------------------------------------------------ */
+
+QGroupBox {
+    background-color: @bg-surface;
+    border: 1px solid @border;
+    border-radius: 4px;
+    margin-top: 18px;
+    padding: 8px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 8px;
+    padding: 0 4px;
+    color: @text-secondary;
+    font-size: 11px;
+    text-transform: uppercase;
+}
+
+QFrame#PreviewSurface {
+    /* Darker than the window so the letterboxing reads as absence of picture rather
+     * than as part of the chrome. Still not #000000 -- §16.3. */
+    background-color: #101215;
+    border: 1px solid @border;
+    border-radius: 4px;
+}
+
+/* ---- buttons ----------------------------------------------------------- */
+
+QPushButton {
+    background-color: @bg-elevated;
+    border: 1px solid @border;
+    border-radius: 4px;
+    padding: 7px 14px;
+    color: @text-primary;
+}
+
+QPushButton:hover:!disabled {
+    background-color: @border;
+}
+
+QPushButton:pressed:!disabled {
+    background-color: @bg-surface;
+}
+
+QPushButton:disabled {
+    color: @text-disabled;
+    background-color: @bg-surface;
+    border-color: @bg-elevated;
+}
+
+QPushButton:focus {
+    border: 1px solid @accent;
+    outline: none;
+}
+
+QPushButton#PrimaryAction {
+    background-color: @accent;
+    border-color: @accent;
+    color: #0E1116;
+    font-weight: 600;
+    padding: 11px 14px;
+}
+
+QPushButton#PrimaryAction:hover:!disabled {
+    background-color: @accent-hover;
+    border-color: @accent-hover;
+}
+
+QPushButton#PrimaryAction:disabled {
+    background-color: @bg-elevated;
+    border-color: @border;
+    color: @text-disabled;
+}
+
+/* Stop is destructive-adjacent: it ends something the user started, and it is the
+ * control they will reach for in a hurry. Coloured so it is never confused with pause. */
+QPushButton#StopAction {
+    background-color: @rec-active;
+    border-color: @rec-active;
+    color: #0E1116;
+    font-weight: 600;
+    padding: 11px 14px;
+}
+
+QPushButton#StopAction:disabled {
+    background-color: @bg-elevated;
+    border-color: @border;
+    color: @text-disabled;
+}
+
+/* ---- inputs ------------------------------------------------------------ */
+
+QLineEdit,
+QComboBox,
+QSpinBox,
+QPlainTextEdit,
+QListWidget {
+    background-color: @bg-elevated;
+    border: 1px solid @border;
+    border-radius: 4px;
+    padding: 5px 7px;
+    selection-background-color: @accent;
+    selection-color: #0E1116;
+}
+
+QLineEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QListWidget:focus {
+    border: 1px solid @accent;
+}
+
+QLineEdit:disabled,
+QComboBox:disabled,
+QSpinBox:disabled {
+    color: @text-disabled;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 18px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: @bg-elevated;
+    border: 1px solid @border;
+    selection-background-color: @accent;
+    selection-color: #0E1116;
+}
+
+QListWidget::item {
+    padding: 5px;
+    border-radius: 4px;
+}
+
+QListWidget::item:selected {
+    background-color: @accent;
+    color: #0E1116;
+}
+
+QCheckBox {
+    spacing: 7px;
+}
+
+QCheckBox::indicator {
+    width: 15px;
+    height: 15px;
+    border: 1px solid @border;
+    border-radius: 4px;
+    background-color: @bg-elevated;
+}
+
+QCheckBox::indicator:checked {
+    background-color: @accent;
+    border-color: @accent;
+}
+
+QCheckBox:focus {
+    outline: none;
+}
+
+QCheckBox:focus::indicator {
+    border: 1px solid @accent;
+}
+
+/* ---- audio meter ------------------------------------------------------- */
+
+QProgressBar {
+    background-color: @bg-elevated;
+    border: 1px solid @border;
+    border-radius: 4px;
+    height: 9px;
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background-color: @ok;
+    border-radius: 3px;
+}
+
+/* ---- menus and tabs ---------------------------------------------------- */
+
+QMenuBar {
+    background-color: @bg-surface;
+    border-bottom: 1px solid @border;
+}
+
+QMenuBar::item {
+    padding: 5px 10px;
+    background: transparent;
+}
+
+QMenuBar::item:selected {
+    background-color: @bg-elevated;
+    border-radius: 4px;
+}
+
+QMenu {
+    background-color: @bg-surface;
+    border: 1px solid @border;
+    border-radius: 4px;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 6px 22px 6px 12px;
+    border-radius: 4px;
+}
+
+QMenu::item:selected {
+    background-color: @accent;
+    color: #0E1116;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: @border;
+    margin: 4px 6px;
+}
+
+QTabWidget::pane {
+    background-color: @bg-surface;
+    border: 1px solid @border;
+    border-radius: 4px;
+}
+
+QTabBar::tab {
+    background-color: transparent;
+    color: @text-secondary;
+    padding: 7px 14px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background-color: @bg-elevated;
+    color: @text-primary;
+}
+
+QTabBar::tab:focus {
+    border: 1px solid @accent;
+}
+
+/* ---- status readout ---------------------------------------------------- */
+
+/* §16.3: "11 px for the status readout". */
+QLabel#StatusLine,
+QLabel#StatusDetail {
+    font-size: 11px;
+    color: @text-secondary;
+}
+
+QLabel#StatusHeadline {
+    font-size: 13px;
+    font-weight: 600;
+    color: @text-primary;
+}
+
+/* §16.5: "If frames are being dropped, it says so in --warn colour with the exact
+ * count and percentage." */
+QLabel#StatusWarning {
+    font-size: 11px;
+    color: @warn;
+}
+
+QLabel#StatusError {
+    font-size: 11px;
+    color: @rec-active;
+}
+
+QLabel#StatusOk {
+    font-size: 11px;
+    color: @ok;
+}
+
+QLabel#SectionHint {
+    color: @text-secondary;
+    font-size: 11px;
+}
+
+QStatusBar {
+    background-color: @bg-surface;
+    border-top: 1px solid @border;
+    color: @text-secondary;
+}
+
+QStatusBar::item {
+    border: none;
+}
+
+/* ---- scrollbars -------------------------------------------------------- */
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: @bg-elevated;
+    border-radius: 4px;
+    min-height: 24px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: @border;
+}
+
+QScrollBar::add-line,
+QScrollBar::sub-line,
+QScrollBar::add-page,
+QScrollBar::sub-page {
+    background: none;
+    border: none;
+    height: 0;
+    width: 0;
+}

@@ -1,0 +1,2 @@
+[console_scripts]
+framecapture-gui = framecapture_gui.__main__:main

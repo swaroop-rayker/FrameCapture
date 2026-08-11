@@ -1,0 +1,24 @@
+# Scoped override for the only directory that includes cppwinrt.
+#
+# clang-analyzer-core.CallAndMessage produces two false positives inside
+# C:/Program Files (x86)/Windows Kits/.../cppwinrt/winrt/Windows.Graphics.Capture.h:
+#
+#   IDirect3D11CaptureFrame::Surface()   "_winrt_abi_type initialized to a null
+#                                        pointer value" -- the analyzer cannot
+#                                        follow cppwinrt's
+#                                        `*(abi_t<T>**)this` punning, so it
+#                                        models the vtable pointer as null.
+#   GraphicsCaptureSession::IsSupported() the analyzer assumes the WinRT factory
+#                                        cache is empty and walks into
+#                                        call_factory_cast with a null factory.
+#
+# Neither is reachable: acquire() null-checks the frame on the line above, and
+# IsSupported() is a static factory call whose whole job is to be safe to call.
+# They cannot be annotated at the source, because analyzer diagnostics are
+# reported at the sink -- inside Microsoft's header -- and unlike every other
+# check they are not subject to HeaderFilterRegex or ExcludeHeaderFilterRegex.
+#
+# Scoped to this directory so the check keeps guarding the rest of the tree.
+InheritParentConfig: true
+Checks: >
+  -clang-analyzer-core.CallAndMessage

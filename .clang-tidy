@@ -1,0 +1,193 @@
+# FrameCapture clang-tidy configuration.
+#
+# The check list is chosen to mechanise CLAUDE.md §4's banned patterns. The ones
+# clang-tidy cannot express -- unchecked HRESULT, unbounded queues, per-frame
+# logging above TRACE, catch(...) outside a thread entry point -- are enforced by
+# the grep pass in scripts/lint.ps1 and by review.
+
+Checks: >
+  -*,
+  bugprone-*,
+  cert-err34-c,
+  cert-err52-cpp,
+  cert-err58-cpp,
+  concurrency-*,
+  clang-analyzer-*,
+  cppcoreguidelines-init-variables,
+  cppcoreguidelines-no-malloc,
+  cppcoreguidelines-owning-memory,
+  cppcoreguidelines-prefer-member-initializer,
+  cppcoreguidelines-pro-type-cstyle-cast,
+  cppcoreguidelines-pro-type-member-init,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-special-member-functions,
+  cppcoreguidelines-virtual-class-destructor,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -misc-include-cleaner,
+  -misc-non-private-member-variables-in-classes,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -modernize-use-designated-initializers,
+  -performance-enum-size,
+  -portability-avoid-pragma-once,
+  -readability-uppercase-literal-suffix,
+  -modernize-avoid-c-arrays,
+  -modernize-use-scoped-lock,
+  -misc-no-recursion,
+  -misc-misplaced-const,
+  -performance-no-int-to-ptr,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  -cppcoreguidelines-virtual-class-destructor
+
+# Why each of the exclusions in the second group above is off. Each was measured
+# against the real tree, not guessed at; re-enable one only with a plan for the
+# call sites it flags.
+#
+#   modernize-use-designated-initializers
+#       74 hits, almost all from the FC_ERROR_LIST and config KeySpec tables.
+#       Designated initialisers across a 105-row and a 33-row table would triple
+#       their length and make the columns unreadable, which is the opposite of why
+#       those tables are laid out as grids.
+#
+#   performance-enum-size
+#       Suggests narrowing enum base types to uint8_t. FcError deliberately uses a
+#       4-byte base -- its codes run to 9999 and the numeric value is an external
+#       contract. Saving three bytes on an enum nobody stores in bulk is not a
+#       trade worth making.
+#
+#   portability-avoid-pragma-once
+#       The project uses #pragma once consistently and targets MSVC only
+#       (SPEC.md §2.2 item 2). Include guards would be churn with no benefit.
+#
+#   readability-uppercase-literal-suffix
+#       Cosmetic (`1u` vs `1U`), and clang-format does not enforce it, so the two
+#       tools would disagree forever.
+#
+#   modernize-avoid-c-arrays
+#       Flags the fixed stack buffers in the Win32 and crash-path code, where a
+#       raw array is the point: no allocation, known size, usable when the heap is
+#       suspect.
+#
+#   modernize-use-scoped-lock
+#       std::lock_guard is the more precise type when exactly one mutex is taken;
+#       std::scoped_lock's variadic form is for locking several at once. Preferring
+#       the general tool for the specific job is not an improvement.
+#
+#   misc-no-recursion
+#       config::report_unknown_keys walks a TOML tree recursively, which is the
+#       natural shape for that job and bounded by document nesting depth.
+#
+#   misc-misplaced-const
+#       Win32 spells its handle types as typedef'd pointers (HANDLE is void*), so
+#       `const HANDLE h` means "pointer I will not reassign" -- which is exactly
+#       what is intended at every site that has one. The check reads it as a
+#       probable mistake, and would fire on essentially all Win32 code we write.
+#
+#   cppcoreguidelines-virtual-class-destructor
+#       Fires on every forward declaration of a COM interface -- `struct
+#       ID3D11Device;` is reported as "destructor is public and non-virtual".
+#       These are Microsoft's types, declared this way so our headers do not have
+#       to include <d3d11.h>, and COM lifetime is refcounted rather than
+#       destructor-based. There is nothing to fix at any of the sites.
+#
+#   performance-no-int-to-ptr
+#       Every hit is one of two shapes with no alternative. (a) Win32 enumeration
+#       callbacks carry their context as an LPARAM, so EnumDisplayMonitors and
+#       EnumWindows can only recover it by casting the integer back to a pointer.
+#       (b) CaptureTarget stores HWND/HMONITOR as std::uint64_t deliberately, so
+#       that i_screen_capture.h and capture_frame.h do not have to include
+#       windows.h; the cast back happens at exactly the three sites that call
+#       Win32. The check's premise -- that the compiler loses aliasing information
+#       -- is true and irrelevant: these are opaque OS handles, never dereferenced.
+#
+#   clang-analyzer-optin.core.EnumCastOutOfRange
+#       Fires inside MSVC's own <xfilesystem_abi.h>, which we cannot annotate. Our
+#       two hits are both deliberate: MINIDUMP_TYPE is a flags enum whose OR is not
+#       a named enumerator, and test_fc_error constructs an out-of-range FcError on
+#       purpose to prove unrecognised codes are handled.
+
+# /WX has an equivalent here: a tidy diagnostic is a failed build.
+WarningsAsErrors: '*'
+
+# Third-party headers (FFmpeg, spdlog, toml++) are not ours to fix.
+HeaderFilterRegex: '.*[/\\](engine|tests)[/\\].*'
+
+# Two things the filter above lets through and should not:
+#
+#   build/**            fxc's /Fh output (build/<preset>/engine/core/shaders/*.h)
+#                       sits under a path containing "engine", so it matches. It is
+#                       a generated byte array -- `#if 0` disassembly listing and a
+#                       `g_`-prefixed global -- and there is no source file to fix.
+#
+#   Windows Kits/**     cppwinrt's Windows.Graphics.Capture.h draws two
+#                       core.CallAndMessage reports from the analyzer, which cannot
+#                       see that winrt's smart pointers are non-null after a checked
+#                       construction. Microsoft's header, not ours.
+ExcludeHeaderFilterRegex: '.*([/\\]build[/\\]|Windows Kits).*'
+
+FormatStyle: file
+
+CheckOptions:
+  # snake_case for functions and variables, PascalCase for types -- matches the
+  # style already used in fc_core.
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  # Constants are kCamelCase. Used consistently across the whole codebase; without
+  # these entries the plain VariableCase rule flags every one of them.
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstexprVariablePrefix
+    value: k
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.GlobalConstantPrefix
+    value: k
+  - key: readability-identifier-naming.StaticConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.StaticConstantPrefix
+    value: k
+  - key: readability-identifier-naming.ClassConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.ClassConstantPrefix
+    value: k
+  # Local constants stay lower_case: `const int width` is a variable that happens
+  # to be const, not a named constant.
+  - key: readability-identifier-naming.LocalConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: _
+  # The trailing underscore marks a data member regardless of access or storage.
+  # Without these two, a protected or static member is checked against the plain
+  # variable rule and its underscore is reported as a naming error.
+  - key: readability-identifier-naming.ProtectedMemberSuffix
+    value: _
+  - key: readability-identifier-naming.ClassMemberCase
+    value: lower_case
+  - key: readability-identifier-naming.ClassMemberSuffix
+    value: _
+  - key: readability-identifier-naming.MacroDefinitionPrefix
+    value: FC_
+  # An empty catch block is never acceptable (CLAUDE.md §4).
+  - key: bugprone-empty-catch.IgnoreCatchWithKeywords
+    value: ''
+  - key: cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor
+    value: 'true'

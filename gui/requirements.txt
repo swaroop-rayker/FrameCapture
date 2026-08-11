@@ -1,0 +1,19 @@
+# GUI runtime and quality-gate dependencies (SPEC.md §16, §21.2).
+#
+# Pinned with `>=` on the minor rather than `==` on the patch: this is a developer
+# environment, not a shipped artifact. The reproducibility guarantee SPEC.md §21.2 asks
+# for lives in vcpkg's `builtin-baseline` for the engine, and in the installer's bundled
+# interpreter for the GUI (§21.3) -- pinning patch versions here would only mean a stale
+# security fix in every clone.
+
+# SPEC.md §2.1's GUI toolkit. 6.8 is the first release with wheels for Python 3.13+.
+PySide6>=6.8
+
+# CLAUDE.md §4's Python gates. Run by scripts/lint.ps1.
+ruff>=0.6
+mypy>=1.11
+
+# Test runner for `pytest gui/tests -v` (SPEC.md §21.2).
+pytest>=8.0
+# Qt widgets cannot be driven from a bare pytest process without an event loop.
+pytest-qt>=4.4

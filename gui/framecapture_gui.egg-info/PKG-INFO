@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: framecapture-gui
+Version: 1.0.0
+Summary: FrameCapture GUI — control plane only, zero media processing (SPEC.md §16.1)
+Requires-Python: >=3.11

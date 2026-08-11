@@ -1,0 +1,107 @@
+# Python tooling configuration for the GUI (SPEC.md §16, CLAUDE.md §4).
+#
+# At the repo root rather than under `gui/` so `ruff`, `mypy` and `pytest` find it from
+# any working directory -- all three walk upward looking for exactly this file, and a
+# config that only applies when you happen to be `cd`'d into the right place is a gate
+# that passes locally and fails in CI.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "framecapture-gui"
+version = "1.0.0"
+description = "FrameCapture GUI — control plane only, zero media processing (SPEC.md §16.1)"
+requires-python = ">=3.11"
+
+[project.scripts]
+# So `framecapture-gui` works from anywhere once the venv is on PATH, and so the
+# installer (§21.3) has an entry point to wrap rather than a `-m` invocation.
+framecapture-gui = "framecapture_gui.__main__:main"
+
+[tool.setuptools]
+# The package lives under `gui/`, which SPEC.md §23 fixes. Declared rather than
+# auto-discovered so `tests/` and `build/` cannot be swept into a wheel.
+package-dir = {"" = "gui"}
+
+[tool.setuptools.packages.find]
+where = ["gui"]
+include = ["framecapture_gui*"]
+
+[tool.ruff]
+line-length = 120  # matches .clang-format's column limit, so the two halves read alike
+target-version = "py311"
+src = ["gui"]
+
+[tool.ruff.lint]
+# Explicit rather than the default set: the default is a small subset, and a linter
+# whose rule set nobody chose is a linter nobody can argue with.
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # import sorting
+    "N",       # pep8-naming
+    "UP",      # pyupgrade
+    "B",       # bugbear
+    "A",       # shadowed builtins
+    "C4",      # comprehensions
+    "SIM",     # simplify
+    "RET",     # return consistency
+    "PTH",     # pathlib over os.path
+    "RUF",     # ruff's own
+    "ANN",     # annotations — CLAUDE.md §4: "type hints on everything"
+    "ASYNC",
+    "S",       # bandit; the GUI spawns a process and talks over a pipe
+    "T20",     # no stray print()
+]
+ignore = [
+    # The engine is the only thing spawned, from an absolute path resolved next to the
+    # GUI, and the argument list is built in code rather than from user input. `S603`
+    # flags every `subprocess` call regardless, which would mean either a blanket noqa
+    # at the one site that matters or turning the rule off. Off, stated here.
+    "S603",
+    # SPEC.md §16.2 specifies UI glyphs literally -- `❚❚` for pause, `×` for a
+    # resolution, `▸` in a menu path. RUF001 reads them as homoglyph typos, which for a
+    # *user-visible string chosen by the spec* is the wrong reading. The rule stays on
+    # for identifiers and comments (RUF002/RUF003), where it is catching what it should.
+    "RUF001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert; `assert` is the point.
+# `assert` is the point of a test. `qtbot` is pytest-qt's fixture and has no public
+# type, so annotating it as anything but `Any` would be a claim the library does not
+# make -- ANN401 is off here and nowhere else.
+"gui/tests/*" = ["S101", "ANN201", "ANN001", "ANN401", "SLF001"]
+
+[tool.mypy]
+# CLAUDE.md §4: `mypy --strict`. Spelled out rather than relying on the flag, so the
+# gate is identical whether it is run by lint.ps1 or by an editor.
+strict = true
+python_version = "3.11"
+files = ["gui"]
+warn_unreachable = true
+warn_return_any = true
+disallow_any_generics = true
+no_implicit_reexport = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+# PySide6 ships type stubs, but they are generated from C++ signatures and are
+# incomplete in places -- `Signal`/`Slot` in particular are dynamically constructed and
+# resist annotation. Following imports into them produces errors about Qt's own
+# internals, which no change in `gui/` can fix.
+module = ["PySide6.*"]
+follow_untyped_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["gui/tests"]
+# `-ra` reports why anything was skipped. A silently skipped GUI test is the same
+# hazard CLAUDE.md §6 names for the hardware tier: it looks green and proves nothing.
+addopts = "-ra --strict-markers"
+markers = [
+    # Spawns a real engine and records for several seconds. Deselect with
+    # `-m "not engine"` for the fast, hardware-free subset.
+    "engine: needs a built framecapture-engine.exe",
+]

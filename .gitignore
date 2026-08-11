@@ -1,0 +1,24 @@
+# Build output
+/build/
+/dist/
+/stage/
+
+# vcpkg is fetched by scripts/bootstrap.ps1 at the baseline pinned in vcpkg.json.
+# It is not vendored -- the baseline commit is the reproducibility guarantee.
+/vcpkg/
+/vcpkg_installed/
+
+# Python (gui/)
+/.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Editor / OS
+.vs/
+.vscode/
+*.user
+CMakeUserPresets.json
+Thumbs.db

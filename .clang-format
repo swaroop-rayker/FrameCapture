@@ -1,0 +1,45 @@
+---
+# SPEC.md §21.1: LLVM base, 4-space, 120 columns. Never hand-format.
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+AccessModifierOffset: -4
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+NamespaceIndentation: None
+FixNamespaceComments: true
+PointerAlignment: Left
+ReferenceAlignment: Left
+AlwaysBreakTemplateDeclarations: Yes
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BinPackArguments: true
+BinPackParameters: true
+SeparateDefinitionBlocks: Always
+
+SortIncludes: CaseInsensitive
+IncludeBlocks: Preserve
+IncludeCategories:
+  # Own headers first, then FFmpeg's extern "C" block, then third party, then std.
+  - Regex: '^"core/'
+    Priority: 1
+  - Regex: '^<libav|^<libsw'
+    Priority: 2
+  - Regex: '^<(spdlog|toml\+\+|nlohmann|gtest|gmock)/'
+    Priority: 3
+  - Regex: '^<.*\.h>'
+    Priority: 4
+  - Regex: '^<.*>'
+    Priority: 5
+  - Regex: '.*'
+    Priority: 6
+---
+Language: Json
+IndentWidth: 2

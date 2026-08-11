@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "framecapture",
+  "version-semver": "0.1.0",
+  "description": "Windows screen recorder engine.",
+  "homepage": "https://github.com/framecapture/framecapture",
+  "builtin-baseline": "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "swresample",
+        "amf",
+        "nvcodec",
+        "gpl",
+        "x264"
+      ]
+    },
+    "spdlog",
+    "tomlplusplus",
+    "nlohmann-json",
+    "gtest"
+  ]
+}
