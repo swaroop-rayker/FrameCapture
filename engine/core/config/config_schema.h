@@ -9,8 +9,11 @@ namespace fc::config {
 
 /// Bumped whenever the on-disk shape changes. Every file carries it (SPEC.md §17).
 ///
-/// v1 is the first schema, so `builtin_migrations()` is empty. See migration.h.
-constexpr int kCurrentSchemaVersion = 1;
+/// v2 (M9.6) added `[hotkeys]`, `[overlay]` and `[window]`. See `migrate_1_to_2` in
+/// migration.cpp -- one step covers all three, because the step's whole job is the
+/// version stamp and the backup: every key in every one of them has a default, and an
+/// absent key already loads as its default, so there is nothing to rewrite.
+constexpr int kCurrentSchemaVersion = 2;
 
 // ---------------------------------------------------------------------------
 // Enumerated values.
@@ -41,6 +44,14 @@ enum class CaptureBackend { Auto, Wgc, Dda };
 
 enum class LogLevelSetting { Trace, Debug, Info, Warn, Error, Critical };
 
+/// Where an on-screen overlay anchors itself (M9.6 §2.2).
+///
+/// The engine does not draw the overlay -- the GUI does -- but the setting lives here
+/// because SPEC.md §17 makes the engine the only writer of `config.toml`, and a second
+/// settings file for the GUI's own keys would be a second source of truth for exactly
+/// the reason §17 forbids one.
+enum class OverlayCorner { TopLeft, TopRight, BottomLeft, BottomRight };
+
 [[nodiscard]] std::string_view to_string(Container value) noexcept;
 [[nodiscard]] std::string_view to_string(VideoCodec value) noexcept;
 [[nodiscard]] std::string_view to_string(EncoderSelection value) noexcept;
@@ -49,6 +60,7 @@ enum class LogLevelSetting { Trace, Debug, Info, Warn, Error, Critical };
 [[nodiscard]] std::string_view to_string(ChannelLayoutSetting value) noexcept;
 [[nodiscard]] std::string_view to_string(CaptureBackend value) noexcept;
 [[nodiscard]] std::string_view to_string(LogLevelSetting value) noexcept;
+[[nodiscard]] std::string_view to_string(OverlayCorner value) noexcept;
 
 /// The file extension a container must be written with, leading dot included (BUG-043).
 ///
@@ -75,6 +87,7 @@ enum class LogLevelSetting { Trace, Debug, Info, Warn, Error, Critical };
 [[nodiscard]] std::optional<ChannelLayoutSetting> channel_layout_from_string(std::string_view text) noexcept;
 [[nodiscard]] std::optional<CaptureBackend> capture_backend_from_string(std::string_view text) noexcept;
 [[nodiscard]] std::optional<LogLevelSetting> log_level_from_string(std::string_view text) noexcept;
+[[nodiscard]] std::optional<OverlayCorner> overlay_corner_from_string(std::string_view text) noexcept;
 
 // ---------------------------------------------------------------------------
 // The schema table.

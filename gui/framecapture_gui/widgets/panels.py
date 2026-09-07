@@ -27,12 +27,8 @@ from PySide6.QtWidgets import (
 from ..ipc.protocol import RecordingState
 from ..preview import PreviewChannel
 from ..theme import colour
-
-
-def _format_hms(milliseconds: int) -> str:
-    """``HH:MM:SS``. Negative clamps to zero rather than rendering a minus sign."""
-    total = max(0, milliseconds) // 1000
-    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+from ..units import format_hms as _format_hms
+from ..units import format_size
 
 
 class PreviewSurface(QFrame):
@@ -454,7 +450,9 @@ class StatusPanel(QGroupBox):
         self._format.setText(f"{encoded:,} frames encoded")
 
         written = int(stats.get("bytes_written", 0))
-        self._encoder.setText(f"{written / (1024 * 1024):.1f} MB written")
+        # Through `format_size` rather than a bare megabyte division, which rendered a
+        # 1.5 GB recording as `1536.0 MB` -- correct, and it reads as a broken counter.
+        self._encoder.setText(f"{format_size(written)} written")
 
         # The one line §16.5 calls out by name. Exact count *and* percentage, in warn
         # colour the moment it is non-zero -- not above a threshold, because a user

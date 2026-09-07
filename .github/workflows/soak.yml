@@ -1,0 +1,91 @@
+# The long forms, on the reference rig (M9.6 plan §7.3).
+#
+# CLAUDE.md §3 gives every long-running test an environment override so the routine suite
+# stays quick and the exit-criterion form is one variable away. This workflow is those
+# variables, on a schedule.
+#
+# | Variable                | Test                        | Routine | Here   |
+# |-------------------------|-----------------------------|---------|--------|
+# | FC_AV_SYNC_SECONDS      | test_av_sync                | 65      | 1800   |
+# | FC_LOOPBACK_SECONDS     | test_loopback_recording     | 12      | 1800   |
+# | FC_SUSTAINED_SECONDS    | test_sustained_60fps        | 20      | 600    |
+# | FC_MULTITRACK_SECONDS   | test_multitrack row 14      | 20      | 1800   |
+#
+# `FC_LOOPBACK_SECONDS` and `FC_SUSTAINED_SECONDS` are real time; `FC_MULTITRACK_SECONDS`
+# runs on a synthetic clock and takes about 376 s of wall time for its 1800.
+#
+# Same noise warning as gpu.yml: this plays audible tones for the duration.
+#
+# ---------------------------------------------------------------------------
+# SPEC.md §20.1's four-hour soak is NOT here, and that is deliberate.
+# ---------------------------------------------------------------------------
+# It belongs to M10 (plan §0.2: "No 4-hour soak. That is M10's"). The plan asked for the
+# job to be carried here disabled, with the reason in a comment; it is written as this
+# comment instead, because a job with `if: false` renders in the Actions UI as a
+# perpetually skipped job that looks like a feature somebody broke -- which is exactly the
+# "looks finished and isn't" that CLAUDE.md §7 bans. The information is identical and the
+# false signal is not.
+#
+# When M10 adds it: a `soak-4h` job on the same runner, `timeout-minutes: 300`, driven by
+# the same overrides at 14400, asserting §20.1's clause that a four-hour recording holds
+# A/V sync and produces a valid file.
+
+name: Soak
+
+on:
+  schedule:
+    # Sunday 04:00 UTC, after Saturday night's GPU run has finished.
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  # The same group as gpu.yml: one job at a time on the rig. Two recordings competing for
+  # the encoder is the CPU-starvation signature that invalidated three runs during M9.6.
+  group: framecapture-rig
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: Long-form tests
+    runs-on: [self-hosted, windows, framecapture-rig]
+    timeout-minutes: 240
+    env:
+      FC_AV_SYNC_SECONDS: '1800'
+      FC_LOOPBACK_SECONDS: '1800'
+      FC_SUSTAINED_SECONDS: '600'
+      FC_MULTITRACK_SECONDS: '1800'
+    steps:
+      - name: Normalise line endings before checkout
+        shell: pwsh
+        run: git config --global core.autocrlf input
+
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Bootstrap
+        shell: pwsh
+        run: .\scripts\bootstrap.ps1
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset windows-msvc-release
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset windows-msvc-release --parallel
+
+      - name: Soak — the full suite at the long durations
+        shell: pwsh
+        run: ctest --preset windows-msvc-release --output-on-failure
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-test-logs
+          path: |
+            build/windows-msvc-release/Testing/**/LastTest.log
+          if-no-files-found: ignore

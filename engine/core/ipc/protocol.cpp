@@ -73,6 +73,8 @@ std::string_view to_string(Event event) noexcept {
         return "segment_rolled";
     case Event::RecordingFinalized:
         return "recording_finalized";
+    case Event::FinalizeProgress:
+        return "finalize_progress";
     }
     return "unknown";
 }

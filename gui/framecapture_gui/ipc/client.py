@@ -25,15 +25,30 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from .framing import FrameReader, FramingError, encode_message
 from .protocol import PROTOCOL_MAJOR, PROTOCOL_VERSION, Command, Event, pipe_path_for, timeout_for
 
 _log = logging.getLogger(__name__)
 
+#: The value a completion callback receives -- a response body, or the exception that
+#: replaced it.
+_T = TypeVar("_T")
+
 #: Called with (event, body) on the reader thread.
 EventCallback = Callable[[Event, dict[str, Any]], None]
+
+#: How many user-initiated commands may be waiting at once. Small on purpose: these
+#: come from button presses and hotkeys, and a backlog longer than this means the
+#: engine has stopped answering, not that the user is fast. Dropping the newest and
+#: logging it is more honest than queueing a stop the user pressed twenty seconds ago.
+_MAX_PENDING_COMMANDS = 8
+
+#: One queued command: what to send, and who to tell.
+_PendingCommand = tuple[
+    "Command", dict[str, Any], Callable[[dict[str, Any]], None] | None, Callable[[Exception], None] | None
+]
 
 
 class IpcError(Exception):
@@ -71,6 +86,13 @@ class IpcClient:
         self._pending: dict[str, dict[str, Any]] = {}
         self._pending_lock = threading.Lock()
         self._answered = threading.Condition(self._pending_lock)
+
+        # The async command path. Started lazily on the first `request_async`, so a
+        # caller that never uses it never pays for a thread.
+        self._async_queue: list[_PendingCommand] = []
+        self._async_lock = threading.Lock()
+        self._async_wake = threading.Condition(self._async_lock)
+        self._async_thread: threading.Thread | None = None
 
         self.events_received = 0
 
@@ -113,6 +135,20 @@ class IpcClient:
         if not self._running.is_set():
             return
         self._running.clear()
+
+        # Woken before the reader is joined so an in-flight command sees the channel
+        # closing and gives up, rather than sitting out its own timeout while the
+        # caller waits. Queued-but-unsent commands are abandoned deliberately: the
+        # engine is going away, and issuing them would be writing to a closing pipe.
+        with self._async_wake:
+            self._async_queue.clear()
+            self._async_wake.notify_all()
+        async_thread = self._async_thread
+        self._async_thread = None
+        if async_thread is not None and async_thread.is_alive():
+            async_thread.join(timeout=2.0)
+            if async_thread.is_alive():
+                _log.warning("ipc command thread did not exit within 2s; leaving it to process exit")
 
         if self._reader is not None and self._reader.is_alive():
             self._reader.join(timeout=2.0)
@@ -189,6 +225,92 @@ class IpcClient:
                 detail=str(answer.get("detail", "")),
             )
         return answer
+
+    def request_async(
+        self,
+        command: Command,
+        params: dict[str, Any] | None = None,
+        *,
+        on_done: Callable[[dict[str, Any]], None] | None = None,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> bool:
+        """Send one command **without blocking the caller**, and report back later.
+
+        The reason this exists is measured, not stylistic. ``stop_record`` carries
+        SPEC.md §15.1's 30-second timeout because finalization is legitimately slow, and
+        ACCEPTANCE.md's BUG-046 measured how slow: ~3.3 s of remux plus ~1 s of validate
+        for a 1.2 GB recording. Called from the GUI thread, `request` freezes the event
+        loop for exactly that long — which means the save-progress bar cannot paint,
+        every button stops responding, and ``WM_HOTKEY`` sits unread in the thread queue
+        so the global hotkeys appear to stop working. Three separate reported symptoms,
+        one cause.
+
+        **One worker thread, not one per call.** A thread per click is an unbounded
+        queue wearing a different hat (CLAUDE.md hard rule 5), and this side of the
+        process is not exempt from that rule. The backlog is bounded and the drop policy
+        is explicit: a full queue rejects the *newest* request and says so, because the
+        commands already queued are the ones the user pressed first.
+
+        Returns False if the command could not be queued. `on_done` and `on_error` are
+        invoked on the worker thread, so a Qt caller must marshal — which is precisely
+        what `EngineController` already does for events.
+        """
+        if not self._running.is_set():
+            return False
+
+        with self._async_lock:
+            if self._async_thread is None:
+                self._async_thread = threading.Thread(target=self._async_loop, name="fc-ipc-command", daemon=True)
+                self._async_thread.start()
+            if len(self._async_queue) >= _MAX_PENDING_COMMANDS:
+                _log.warning("dropping %s: %d commands already queued", command.value, len(self._async_queue))
+                return False
+            self._async_queue.append((command, dict(params or {}), on_done, on_error))
+            self._async_wake.notify()
+        return True
+
+    def _async_loop(self) -> None:
+        """Drains the command queue, one request at a time.
+
+        Serialised deliberately. The engine handles one request at a time anyway -- its
+        pipe thread reads the next only after the current one returns -- so issuing two
+        concurrently would buy nothing and would make the order in which the user's
+        clicks reach the engine depend on thread scheduling.
+        """
+        while True:
+            with self._async_lock:
+                while not self._async_queue and self._running.is_set():
+                    self._async_wake.wait(0.25)
+                if not self._async_queue:
+                    if not self._running.is_set():
+                        return
+                    continue
+                command, params, on_done, on_error = self._async_queue.pop(0)
+
+            try:
+                answer = self.request(command, params)
+            except (IpcError, EngineError) as error:
+                if on_error is not None:
+                    self._safely(on_error, error)
+                continue
+            if on_done is not None:
+                self._safely(on_done, answer)
+
+    @staticmethod
+    def _safely(callback: Callable[[_T], None], value: _T) -> None:
+        """Run a completion callback without letting it kill the worker.
+
+        The same contract `_dispatch` gives event handlers: one bad callback costs its
+        own notification, not the channel.
+
+        Generic rather than `Any` so the two call sites stay type-checked: one passes a
+        response body and one an exception, and a signature wide enough for both would
+        also be wide enough to pass either to the wrong one.
+        """
+        try:
+            callback(value)
+        except Exception:
+            _log.exception("a command callback raised; the command thread continues")
 
     def handshake(self, client_name: str = "gui/1.0.0") -> dict[str, Any]:
         """SPEC.md §15.1's handshake.

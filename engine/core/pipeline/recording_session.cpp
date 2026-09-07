@@ -246,6 +246,7 @@ Result<void> RecordingSession::Impl::open_pipeline(const std::filesystem::path& 
     pipeline_settings.pool_bind_flags = pool_bind_flags;
     pipeline_settings.injected_stall_ns = settings.injected_stall_ns;
     pipeline_settings.injected_stall_period = settings.injected_stall_period;
+    pipeline_settings.on_finalize_progress = settings.on_finalize_progress;
 
     pipeline = std::make_unique<VideoPipeline>();
     FC_TRY(pipeline->start(device->device(), pipeline_settings));

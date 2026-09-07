@@ -15,6 +15,694 @@ graded deliverable, not a nicety.
 
 ---
 
+## [BUG-055] Four menu tests failed together, then passed, because they read the real Windows clipboard
+
+**Severity:** Minor in effect, major in kind (an intermittently red suite is a suite nobody trusts)   **Found:** 2026-09-06   **Fixed:** 2026-09-06   **Commit:** _uncommitted_
+
+### Symptom
+
+A full `pytest gui/tests -m "not engine"` run that had passed 281/281 twice reported:
+
+```
+4 failed, 277 passed, 17 deselected in 32.03s
+FAILED test_menu_actions.py::test_copy_output_path_names_the_folder_when_nothing_has_been_recorded
+FAILED test_menu_actions.py::test_copy_output_path_switches_to_the_recording_once_there_is_one
+FAILED test_menu_actions.py::test_the_diagnostics_summary_reaches_the_clipboard_with_the_facts_in_it
+FAILED test_menu_actions.py::test_the_diagnostics_summary_still_renders_with_the_engine_down
+```
+
+Running `test_menu_actions.py` on its own immediately afterwards: 41 passed. Running the
+full suite again: 281 passed.
+
+### Investigation
+
+The four are exactly — and only — the tests that did this:
+
+```python
+window._copy_output_path()
+assert QApplication.clipboard().text() == str(window._output_directory)
+```
+
+Nothing else in the suite touches the clipboard, and no other test failed. Nothing was
+running concurrently: the pytest run and the `lint.ps1` run in that shell invocation were
+sequential.
+
+### Root cause
+
+The Windows clipboard is a **machine-wide resource behind a lock**. `OpenClipboard` fails
+while another process holds it, and Qt's `QClipboard::setText` does not raise when that
+happens — the write is simply lost and the subsequent read returns whatever was there
+before. Any process on the machine can take that lock at any moment; a browser, the shell,
+a password manager, the desktop app this session runs in.
+
+So the four assertions were reading a global mutable resource that no part of the test
+owns. They pass when nothing else wants the clipboard for a few microseconds, and fail
+when something does. **The failure has nothing to do with the code under test**, which is
+what makes it worse than no test: the natural response to an intermittent red is to re-run
+until it is green, and that habit is how a real intermittent defect gets ignored later.
+
+### Fix
+
+A seam, and one place rather than two:
+
+```python
+def _set_clipboard(self, text: str) -> None:
+    """The one place this application writes the clipboard."""
+    QGuiApplication.clipboard().setText(text)
+```
+
+Both copy actions go through it. A `copied` fixture replaces it with a list's `append`, so
+the tests assert on **the text the window produced** and never touch the system clipboard.
+
+That is the right boundary independently of the flake. What this project can get wrong is
+*which text* it copies — the wrong path, a summary missing the adapter that owns the
+display output, a malformed line. That `QClipboard.setText` then works is Qt's contract.
+
+Verified by three consecutive full-suite runs: 281/281 each time.
+
+### Lessons
+
+1. **A test must not assert on a resource it does not own.** The system clipboard, the
+   real desktop, the user's config file, a fixed TCP port — each makes a test's result
+   depend on the machine rather than the change. CLAUDE.md §5 already says tests use the
+   synthetic source and never the real desktop; the clipboard is the same rule in a place
+   the rule had not been stated.
+2. **Put the shared resource behind one method.** The seam that makes the test
+   deterministic is the same seam that would make the failure handleable if it ever needs
+   handling. Two call sites would have needed two patches and would have given the
+   application two places to get the failure wrong.
+3. **An intermittent green is a result to investigate, not to accept.** This one cost ten
+   minutes because the four failures shared an obvious property. The reason to spend those
+   ten minutes now is that the next intermittent failure will not be obvious, and a suite
+   with a known flake in it teaches everyone to re-run rather than read.
+
+---
+
+## [BUG-054] Asking a menu for its contents deleted the menu
+
+**Severity:** Major (a menu bar whose menus open empty, which is the exact defect Phase 4 existed to remove)   **Found:** 2026-09-06   **Fixed:** 2026-09-06   **Commit:** _uncommitted_
+
+### Symptom
+
+The first run of `test_menu_actions` — the named test for M9.6 Phase 4, which walks
+`menuBar()` and asserts that no menu opens empty — failed on five cases with the same
+error, and not an assertion:
+
+```
+RuntimeError: libshiboken: Internal C++ object (PySide6.QtWidgets.QMenu) already deleted.
+```
+
+The menus had been rendered to PNG moments earlier and were plainly there, fully
+populated. Constructing the window in a plain script and printing each menu's action
+count also worked:
+
+```
+'&File' 1   '&Edit' 4   '&View' 8   '&Tools' 9   '&Help' 1
+```
+
+So the menus existed, and asking a test about them did not.
+
+### Investigation
+
+The difference between the script that worked and the test that did not was narrowed by
+elimination, one property at a time. Not the stylesheet, not `qtbot`, not the fixture's
+replacement of the `EngineController`, and not a `gc.collect()`. What was left was the
+shape of the helper:
+
+```python
+def _menus(win):
+    return [action.menu() for action in win.menuBar().actions() if action.menu() is not None]
+```
+
+`action.menu()` appears **twice** per action — once in the condition, once in the
+expression. The script called it once and kept the result. Measured directly:
+
+```
+double-call validity: [False, False, False, False, False]
+single-call validity: [False, False, False, False, True]
+held validity:        [False, False, False, False, False, False, False, False]
+```
+
+The third line is the important one. `MainWindow` had by then been changed to keep every
+menu in `self._menus`, so a live Python reference existed to all eight — and they died
+anyway. All eight: the three submenus went with their parents, so a single discarded
+wrapper for the View menu took `Panels` with it.
+
+### Root cause
+
+PySide hands back a `QMenu` from `QMenuBar.addMenu(str)` and from `QAction.menu()` with
+**Python ownership**, despite Qt having parented the menu to the bar. When a wrapper for
+one of those is discarded, shiboken deletes the underlying C++ object. Holding another
+reference does not save it.
+
+So the menu bar's menus were alive only for as long as nothing asked about them. Nothing
+in the shipped GUI asks — which is why this had been latent since the menu bar was first
+written, and why it surfaced the moment a test enumerated it.
+
+**The failure mode is what makes this worth an entry.** There is no crash in the
+application: the title stays on the bar and the menu opens *empty*. That is
+indistinguishable from the defect this whole phase existed to remove, and it would have
+been reported as "the Tools menu is empty again" long after the change that caused it.
+
+### Fix
+
+Two parts, and only the second actually prevents deletion.
+
+1. **`MainWindow._add_menu`** creates every menu — top-level and sub — and appends it to
+   `self._menus`. This does not stop a discarded wrapper deleting the menu, but it gives
+   the window a single, named owner and, crucially, a registry that can be traversed
+   without going through `QAction.menu()` at all.
+2. **Nothing traverses menus via `QAction.menu()`.** The test's `_menus` reads
+   `MainWindow._menus` and cross-checks the titles against `menuBar()`, so a menu created
+   with a bare `addMenu` — the way the bug gets reintroduced — appears on the bar, not in
+   the registry, and fails loudly with its title named. `_all_actions` skips submenu
+   openers by identity against `QMenu.menuAction()`, which is owned by the menu and safe.
+
+### Regression test
+
+`gui/tests/test_menu_actions.py::test_every_menu_is_registered_with_the_window`, plus
+`test_no_menu_opens_empty` and `test_every_action_is_enabled_and_none_is_a_placeholder`,
+which fail through the same registry check.
+
+Verified by reverting: with the `self._menus.append(menu)` line removed,
+`test_every_menu_is_registered_with_the_window`, `test_no_menu_opens_empty`,
+`test_every_action_triggers_without_raising` and
+`test_settings_carries_the_shortcut_the_plan_names` all fail.
+
+That revert also exposed a second hole and closed it. With the registry empty,
+`_all_actions` returned nothing, so `test_every_action_is_enabled_and_none_is_a_placeholder`
+passed **vacuously** — a loop over an empty list asserts nothing. Both sweeps now assert a
+floor on how many actions they walked, which is the difference between a test that checks
+every action and a test that checks that there are no actions.
+
+### Lessons
+
+1. **A Qt object handed back by a getter is not automatically safe to discard.** The
+   idiomatic Python filter — call the accessor in the condition and again in the
+   expression — is the exact shape that destroys it. Where an accessor returns a
+   long-lived Qt object, call it once and keep what it returned.
+2. **Own what you create.** The window created five menus and kept none of them. That was
+   survivable only by accident, and "survivable by accident" is what turns into a defect
+   the first time anything else touches it.
+3. **A failure that is a `RuntimeError` from the bindings is still a product bug.** The
+   temptation was to call it a test artefact and write the traversal differently. The
+   measurement — that the *held* references died too — is what showed it was ownership
+   and not the test.
+4. **Reverting the fix found the second bug.** Lesson 3 of M9.6's Phase 0–3 lessons says
+   verify a regression test by reverting its fix; here that check did not just confirm the
+   test, it revealed that a neighbouring test had been passing on an empty collection.
+
+---
+
+## [BUG-053] The hotkey capture field ignored every key except the fifteen in its lookup table
+
+**Severity:** Major (the settings section could not be used to change a shortcut)   **Found:** 2026-09-05   **Fixed:** 2026-09-05   **Commit:** _uncommitted_
+
+### Symptom
+
+Reported from real use: "the hotkey is not registering when trying to enter/change to a
+new hotkey combination". Clicking a field and pressing a combination did nothing -- the
+field stayed as it was, and no shortcut was recorded.
+
+### Investigation
+
+Reproduced immediately by sending synthetic key events at a `HotkeyEdit` and printing
+what came out:
+
+```
+expected               via keyPressEvent
+Ctrl+Alt+R             ''                 <-- BROKEN
+Ctrl+Shift+F9          'Ctrl+Shift+F9'
+Ctrl+Alt+Home          'Ctrl+Alt+Home'
+Ctrl+Alt+5             ''                 <-- BROKEN
+Ctrl+Alt+Num5          ''                 <-- BROKEN
+Ctrl+Alt+-             ''                 <-- BROKEN
+Ctrl+Alt+[             ''                 <-- BROKEN
+Ctrl+Shift+Delete      ''                 <-- BROKEN
+```
+
+The keys that worked were exactly the contents of `_KEY_NAMES_BY_QT` -- the function keys
+and a handful of named navigation keys. **Everything else -- every letter, every digit,
+the whole numpad, all punctuation -- captured nothing**, which for a user reaching for
+`Ctrl+Alt+R` is the entire feature not working.
+
+### Root cause
+
+The fallback for a key not in the lookup table:
+
+```python
+name = _KEY_NAMES_BY_QT.get(key)
+if name is None:
+    text = QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier).text()
+    name = text.strip().lower()
+if not name:
+    return ""
+```
+
+`QKeyEvent`'s constructor takes the event's text as a **parameter**; it does not derive it
+from the key code. None was passed, so `text()` returned `""` every time. The fallback
+could never have produced a name for anything -- it was dead code that looked like
+working code, and it silently swallowed every key the table did not already list.
+
+Reading `event.text()` from the *real* event would not have worked either: with Ctrl held,
+a letter's text is the control character (`Ctrl+R` is `\x12`), not `r`.
+
+### Fix
+
+Derive the name from the key **code**, which is the only thing that identifies the key
+struck regardless of what is held with it:
+
+- `Key_A`-`Key_Z` and `Key_0`-`Key_9` from `chr(int(key))`;
+- numpad digits from the same codes plus `KeypadModifier`, mapped to `num0`-`num9` --
+  they are different virtual keys to Windows, so a user who binds the numpad must get
+  the numpad;
+- numpad operators and punctuation from explicit tables keyed by Qt code.
+
+`Delete` also became bindable in the same change. It had been grouped with `Escape` and
+`Backspace` as a "clear the field" gesture, which made `Ctrl+Shift+Delete` unreachable;
+`Escape` and `Backspace` are enough for clearing.
+
+### Regression test
+
+`test_every_kind_of_key_can_be_captured`, parametrised over a letter, a function key, a
+navigation key, a digit, punctuation, a bracket, `Delete`, an arrow and `Space`; plus
+`test_the_numpad_captures_as_the_numpad` and `test_a_captured_combination_is_announced`.
+Verified by reverting the fix: six of them fail, and pass with it.
+
+### Lessons
+
+- **The tests covered the section's `load` and `collect` and never pressed a key at it.**
+  Both of those set the field's text directly, so the entire capture path -- the reason
+  the widget exists -- had no coverage at all. A round-trip test through the data layer
+  can look like thorough coverage of a widget whose job is input.
+- **A fallback that cannot work is worse than no fallback.** Had the code simply returned
+  `""` for an unlisted key, the fifteen-key limit would have been obvious on the first
+  read. Wrapping it in a plausible-looking `QKeyEvent(...).text()` made it look handled.
+- Constructing a Qt event to interrogate it is a smell: `QKeyEvent` is a *carrier* of
+  what happened, not a decoder of key codes, and asking a synthetic one what a key means
+  is asking a question it was never given the answer to.
+- This is the fourth defect this milestone found by exercising the thing rather than by
+  reading it, and the second where the missing coverage was the *interaction* layer
+  (BUG-052 was the animation applying the layout; this is the widget receiving input).
+
+---
+
+## [BUG-052] A toast animating toward a superseded slot finished there, overlapping its neighbour
+
+**Severity:** Major (the reported overlapping-notifications defect; purely visual)   **Found:** 2026-09-05   **Fixed:** 2026-09-05   **Commit:** _uncommitted_
+
+### Symptom
+
+With five notifications posted back to back, the column settled wrong:
+
+```
+Recording quality reduced (x2)   y= 156   <- should be 24
+The recording engine stopped     y=  88   height 124  -> occupies 88..211
+Saved FrameCapture_....mkv       y= 220
+Recording paused                 y= 306
+```
+
+The first toast sat *inside* the second. Three of the four were exactly right, which is
+what made it look like a geometry bug in the one that was wrong.
+
+### Investigation
+
+`stack_positions` is pure and had 200 randomised sequences of differing heights behind it
+across all four corners, all green. Recomputing the wanted positions from the live widget
+sizes at the moment of the failure agreed with the pure function -- the layout it had
+been *asked for* was correct. The toast simply was not where the layout said.
+
+The difference between a run that reproduced it and one that did not turned out to be
+whether the event loop ran between posts. Every widget test pumped `processEvents()`
+between messages, and none of them reproduced it. Posting five messages back to back --
+which is what a real error burst does, and what the screenshot script happened to do --
+reproduced it every time.
+
+Tracing positions through the burst showed why:
+
+```
+-- immediately after five back-to-back posts: settling=True
+   Recording quality reduced  pos=24   want=24    <- skipped: already "in place"
+   Engine stopped             pos=24   want=88
+-- after settling
+   Recording quality reduced  pos=138  want=24    <- carried off by a stale animation
+```
+
+### Root cause
+
+`_relayout` decided whether to move a toast with:
+
+```python
+if toast.pos() != position:
+    self._animate_to(toast, position)
+```
+
+That compares a toast's **current** position against its new target. During a burst every
+toast is momentarily still at the anchored corner, because none of the 120 ms transitions
+has advanced. A toast that was already sliding toward a *now-stale* slot therefore
+compared equal to its new target, was skipped -- and the animation from the previous
+layout kept running and delivered it to the old slot.
+
+The guard was asking "is it there yet?" when the question is "is it *going* there?".
+
+### Fix
+
+A relayout supersedes everything in flight, unconditionally:
+
+```python
+for animation in self._animations.values():
+    animation.stop()
+self._animations.clear()
+```
+
+before the per-toast comparison. A relayout is by definition the new truth about where
+things go; an animation started against the previous layout is aiming at a slot that no
+longer exists. Stopping mid-slide is correct rather than jarring -- the toast simply
+animates on from wherever it had reached.
+
+Two related hazards were removed in the same pass: animations are now keyed per toast
+rather than held in a list (two `QPropertyAnimation`s driving one `pos` fight, and the
+winner is whichever finishes last), and a toast's animation is stopped when the toast is
+removed, which had been a write to a deleted widget on the next frame.
+
+### Regression test
+
+`test_a_burst_with_no_event_processing_still_settles_correctly` -- five posts with no
+event loop in between, ending on a coalesced repeat so the relayout happens while four
+animations are running. It asserts the **settled positions**, not merely the absence of
+overlap: a column that settled one slot down as a whole would pass an overlap check.
+
+Verified by reverting the fix: it fails with
+`QPoint(1172, 92) == QPoint(1172, 24)`, and passes with it.
+
+### Lessons
+
+- **A guard against "already correct" has to account for what is in motion.** Any
+  animated layout has two positions per item -- where it is and where it is going -- and
+  comparing against the wrong one is invisible until two updates arrive inside one
+  transition.
+- **Pumping the event loop between steps hid the bug in every test that had one.** The
+  realistic case is a burst with no pump: an error storm, or a stop that saves and then
+  reports. A widget test that processes events between every action is testing an
+  interaction pattern users do not have.
+- The pure geometry was correct and thoroughly tested throughout. Property tests over
+  `stack_positions` could never have found this, because the defect was in the layer that
+  *applies* the geometry. Splitting pure logic out is worth doing and is not sufficient
+  on its own.
+- Found, again, by rendering the thing and looking at it -- the third visual defect this
+  milestone (BUG-050, BUG-051, this one) that no state assertion could see.
+
+---
+
+## [BUG-051] The theme's universal `QWidget` background painted a hard-edged dark rectangle inside the rounded pill
+
+**Severity:** Minor (purely visual; no effect on a recording)   **Found:** 2026-09-05   **Fixed:** 2026-09-05   **Commit:** _uncommitted_
+
+### Symptom
+
+Reported from real use, with a photograph of the screen. The recording pill showed a
+**square dark block** across its middle — behind the elapsed time and the file size —
+inside an otherwise rounded, translucent body. It looked like a rendering fault.
+
+### Investigation
+
+`theme_dark.qss` opens with a universal rule:
+
+```css
+QWidget {
+    background-color: @bg-base;   /* #16181C */
+    ...
+}
+```
+
+The pill paints its own rounded body in `paintEvent` with `bg-surface` (`#1E2126`) at
+alpha 238. Its children are ordinary widgets, so the universal rule fills them with
+`bg-base` — which is *darker* than the body and has square corners.
+
+Sampling a row of the grabbed widget shows it exactly:
+
+```
+x=  6  #1e2126 a=238     <- pill body
+x= 48  #16181c a=255     <- the block starts
+x=270  #16181c a=255
+x=348  #1e2126 a=238     <- pill body again
+```
+
+The appended pill styles had made only `#RecordingPill QLabel` transparent. The
+`QStackedWidget` holding the two pages, and the pages themselves, were left to the
+universal rule.
+
+### Root cause
+
+A universal `QWidget` background rule reaches every child of every widget in the
+application, including containers a custom-painted widget expects to be invisible. A
+widget that paints its own background has to opt its containers *out*; there is nothing
+in Qt that makes a child transparent by default once such a rule exists.
+
+### Fix
+
+```css
+#RecordingPill QLabel,
+#RecordingPill QStackedWidget,
+#RecordingPill QStackedWidget > QWidget,
+#PillDot {
+    background: transparent;
+}
+```
+
+`_PillDot` gained an object name so it could be named here; it was showing the same
+`bg-base` fill, invisibly, because 14×14 px of `#16181C` on `#1E2126` is not something
+the eye picks out.
+
+### Regression test
+
+`test_the_pill_body_has_no_opaque_rectangle_in_it` grabs the widget and compares two
+pixels: one inside the stack's area, one on the pill's own painted body. **Not a
+screenshot comparison** — it depends on no font, no metric and no layout, only on the
+property that the background is uniform.
+
+**The first version of this test was worthless and passed with the fix reverted.**
+pytest's `qapp` fixture never applies the application stylesheet, so the universal rule
+that *causes* the defect was not present in the test environment. The fixture now applies
+`load_stylesheet()`, and the test was then verified to fail without the fix and pass with
+it — in that order.
+
+Fixing the fixture also surfaced `QtWarningMsg: Unknown property font-variant-numeric`:
+the pill's anti-jitter measure was a CSS property Qt does not implement, silently ignored.
+Replaced with a minimum width measured from the label's own font metrics, which is what
+actually keeps the layout still as the seconds digit changes.
+
+### Lessons
+
+- **A universal `QWidget` rule in a themed application is a background applied to things
+  you did not think of as backgrounds.** Any widget that paints itself has to name its
+  containers and opt them out.
+- **A GUI test fixture that does not apply the application's stylesheet is not testing
+  the application.** Every styling interaction — which is most of what a theme *is* —
+  is absent from it, and a regression test written against that fixture can be green
+  while the defect is on screen.
+- Verify a regression test by reverting the fix. This one was written, passed, and proved
+  nothing; two minutes of checking turned it into a real test. It is the same lesson as
+  BUG-049 in a different medium.
+- Both of this milestone's visual defects (BUG-050, BUG-051) were invisible to state
+  assertions and found by rendering the widget and looking at it. That step belongs in
+  the routine for any new widget, not just when something is suspected.
+
+---
+
+## [BUG-050] `setObjectName` on the pill's stop button silently removed every style it shared with the others
+
+**Severity:** Minor (a control that looked broken; no effect on a recording)   **Found:** 2026-09-05   **Fixed:** 2026-09-05   **Commit:** _uncommitted_
+
+### Symptom
+
+The recording pill's stop button rendered as a flat dark square: no rounded background,
+no border, and not the `--rec-active` red it was supposed to be. The pause button beside
+it was correct.
+
+**Every test passed.** Twenty-odd assertions on the pill covered its states, its clock,
+its progress bar, its close behaviour, and its capture exclusion, and not one of them
+could see this.
+
+### Investigation
+
+Found by rendering the widget in each of its seven states and looking at the images,
+which is the only reason it was found at all before release.
+
+`_PillButton.__init__` sets `setObjectName("PillButton")`, and the stylesheet gives
+`#PillButton` its background, border, radius and hover. The stop button then had
+`setObjectName("PillStop")` applied to add the red.
+
+`setObjectName` **replaces** the name; it does not add one. So the stop button stopped
+matching `#PillButton` entirely and matched only `#PillStop`, which declared a colour and
+nothing else.
+
+### Root cause
+
+Qt object names are singular. Treating one as a class list -- which is what "add
+`PillStop` for the variant" assumes -- silently drops every rule attached to the name it
+overwrote. Nothing warns: the selector that no longer matches simply stops applying.
+
+The same pattern was in the phase label (`PillPhase` -> `PillPhaseFailed`) and happened to
+look right only because that rule re-declared all three properties it needed.
+
+### Fix
+
+A dynamic property for the variant, which is Qt's mechanism for exactly this:
+
+```python
+self._stop.setProperty("variant", "stop")     # not setObjectName("PillStop")
+```
+
+```css
+#PillButton[variant="stop"] { color: @rec-active; }
+```
+
+The object name stays `PillButton`, so the shared rules keep applying and the variant adds
+to them. Same change for the phase label's `state` property. `_repolish` was already
+being called and is still required -- Qt does not re-evaluate a stylesheet when a property
+changes any more than when a name does.
+
+### Regression test
+
+`test_the_buttons_keep_their_shared_styling` and
+`test_the_failed_phase_keeps_its_label_styling` assert the *mechanism* -- that
+`objectName()` is still the shared one and the variant lives in a property. They
+deliberately do not assert appearance: a pixel comparison would pin the theme to one
+font-rendering stack, which `test_main_window` already declines to do for the same reason.
+
+### Lessons
+
+- **A widget's styling is not observable from its state**, and this project's GUI tests
+  are all state tests by design. The gap is real and the only thing that closes it is
+  rendering the thing and looking at it. Worth doing once per new widget rather than
+  never.
+- `setObjectName` is not `classList.add`. When a widget needs a variant of a shared style,
+  the variant belongs in a property.
+- The two occurrences differed only in whether the replacement rule happened to re-declare
+  everything it had displaced. One looked fine and was equally wrong -- which is why the
+  fix went to both rather than only to the one that showed.
+
+---
+
+## [BUG-049] The overlay-exclusion test's DDA case passed under ctest and failed when the suite was run in one process
+
+**Severity:** Major (a green test that proved nothing, gating M9.6's whole overlay design)   **Found:** 2026-09-05   **Fixed:** 2026-09-05   **Commit:** _uncommitted_
+
+### Symptom
+
+`test_overlay_exclusion` is M9.6 Phase 0's gate: it asks whether
+`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` keeps a window out of a real
+capture on both backends, because a "no" for DDA would change the design of two features.
+
+Run through ctest, all six cases passed. Run as one process to collect the measured
+numbers, the DDA exclusion case **failed**:
+
+```
+[ measured ] DDA mean_luma=0.0 overlay_fraction=0.0000
+[  FAILED  ] OverlayExclusionTest.ExcludeFromCaptureLeavesNoOverlayAndNoCutoutDda
+```
+
+Read at face value that says DDA blackens the region — the black-cutout defect the whole
+milestone exists to avoid.
+
+### Investigation
+
+The DDA **control** case is what gave it away. That case places an unstamped overlay and
+asserts it *is* captured, and it reported:
+
+```
+[ measured ] DDA mean_luma=0.0 overlay_fraction=1.0000
+```
+
+Those two numbers cannot both come from one frame. RGB(255,128,0) has a BT.709 luma of
+145.8, so `overlay_fraction = 1.0` and `mean_luma = 0.0` are mutually exclusive
+descriptions of the same pixels. They came from *different* frames: the test aggregated
+a worst case across four frames, taking the lowest luma and the highest overlay fraction,
+so a single all-black frame set the luma while a good frame set the fraction.
+
+Where an all-black frame comes from is in `DdaCapture::Impl::emit`. SPEC.md §4.3 requires
+`DXGI_ERROR_WAIT_TIMEOUT` to yield "a duplicate frame with a correctly advanced PTS", and
+`emit` implements that by re-emitting `latest` — the copy target. Before the first real
+`AcquireNextFrame` has copied anything into it, that texture is a freshly created,
+zero-filled one. Those frames are black everywhere, including under the overlay's rect.
+
+WGC never showed this because it composites on change and does not have a
+duplicate-on-timeout path to emit an unpopulated buffer from.
+
+The flakiness followed directly: `gtest_discover_tests` runs each case in its own
+process, and whether an unpopulated duplicate landed inside the first four frames depended
+on timing that differed between a fresh process and the fifth test in a shared one.
+
+### Root cause
+
+**The test asserted on frames it had not established came from the fixture.**
+
+`ScreenAnimator` exists precisely because of BUG-033 — capture tests that reported on
+whatever happened to be on screen — and `pattern_signature` is documented in its header
+as "the check that the frames under assertion really came from the fixture". The new test
+used the animator but never applied that check, so DDA's startup behaviour was measured as
+if it were a property of display affinity.
+
+### Fix
+
+A `shows_pattern` gate before any frame is inspected. It samples two bar centres in the
+top third, outside the overlay's rect — bar 0 must be black and bar 6 must be yellow — so
+a zero-filled duplicate is rejected rather than measured. Frames are drawn until four have
+passed the gate, with a bounded attempt count so a backend that never delivers a usable
+frame ends the loop instead of spinning. The count of rejected frames is printed alongside
+the measurements, and the DDA control now reports `rejected=1` — the unpopulated frame,
+correctly discarded.
+
+Two smaller fixture defects were fixed in the same pass:
+
+- the overlay window's colour was **magenta**, which is one of the eight bars
+  `ScreenAnimator` paints. An overlay coloured like the pattern it sits on cannot be
+  distinguished from it. Changed to orange, which is in neither the bar palette nor the
+  two greys of the moving block.
+- `OverlayWindow::destroy` deleted the brush that its registered window class still
+  referenced. A window class outlives its windows and cannot be re-registered, so the
+  second `create()` in a test kept the first registration and painted with a
+  `DeleteObject`'d handle. The window came up unpainted and the recreation case measured
+  an overlay fraction of 0 — reporting "the affinity survived recreation", the exact
+  opposite of what had happened. The class now has no background brush and the window is
+  filled explicitly in `repaint`.
+
+### Regression test
+
+`OverlayExclusionTest.*` itself, with the gate in place. The measured result, stable over
+four consecutive runs of the full suite in one process:
+
+| case | backend | mean_luma | overlay_fraction |
+|---|---|---|---|
+| unstamped (control) | WGC | 145.8 | 1.0000 |
+| unstamped (control) | DDA | 145.8 | 1.0000 |
+| `WDA_MONITOR` | WGC | 0.0 | 0.0000 |
+| `WDA_EXCLUDEFROMCAPTURE` | WGC | 255.0 | 0.0000 |
+| `WDA_EXCLUDEFROMCAPTURE` | DDA | 255.0 | 0.0000 |
+
+145.8 is exactly the BT.709 luma of RGB(255,128,0), and 255.0 is the animator's white
+bar coming through intact. **DDA honours `WDA_EXCLUDEFROMCAPTURE` on this rig**, so M9.6
+§1.3's fallback ladder is not needed.
+
+### Lessons
+
+- **A worst-case aggregation across frames needs every frame to be valid.** Taking the
+  minimum of one statistic and the maximum of another across a set of frames produces a
+  pair of numbers that may describe no frame at all — which is what made the
+  contradiction visible, and would have made a subtler version invisible.
+- **A control case earns its place by failing informatively.** The exclusion case's
+  failure was ambiguous between "DDA does not honour the affinity" and "the measurement
+  is wrong". The control's impossible number settled it in one line.
+- **`ScreenAnimator` is only half the fixture; `pattern_signature` is the other half.**
+  BUG-033's lesson was "own what is on screen". The completion of it is "and check that
+  what you captured is what you own" — a new capture test that skips the check
+  reintroduces the original bug wearing a new backend.
+- Running a GPU suite **in one process** is a different test from running it through
+  ctest, and it found this. Worth doing before believing a per-process green.
+
+---
+
 ## [BUG-048] A 7.1 pin on a stereo endpoint up-mixed to eight channels, and Windows' own player would not play the audio
 
 **Severity:** Major (a recording whose audio is unplayable in the default Windows player, with nothing to say why)   **Found:** 2026-08-06   **Fixed:** 2026-08-06   **Commit:** _uncommitted_

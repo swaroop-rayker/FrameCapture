@@ -15,5 +15,12 @@ mypy>=1.11
 
 # Test runner for `pytest gui/tests -v` (SPEC.md §21.2).
 pytest>=8.0
+# Reads .github/workflows/*.yml in test_workflows.py. SPEC.md §20.1's rule -- that the
+# GPU tier never runs on a hosted runner, where it would pass meaninglessly -- is a
+# property of those files, and the only way to assert a property of a YAML file is to
+# parse it.
+PyYAML>=6.0
+# PyYAML ships no inline annotations, and `mypy --strict` refuses an untyped import.
+types-PyYAML>=6.0
 # Qt widgets cannot be driven from a bare pytest process without an event loop.
 pytest-qt>=4.4

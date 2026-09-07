@@ -848,15 +848,48 @@ namespace {
 }
 
 /// Copies every packet from `in` to `output`, rescaling into the destination's timebases.
+///
+/// `on_progress`, when given, is called at `kFinalizeProgressIntervalNs` intervals with the
+/// read's position in the source. Measured by *bytes read* rather than packets copied:
+/// packet counts are proportional to bytes only when packets are the same size, and a
+/// recording's audio packets are two orders of magnitude smaller than its keyframes, so a
+/// packet-counted bar races through the audio and crawls through the video. `avio_size` is
+/// the source's length and `avio_tell` the read position libavformat advances as it demuxes.
+///
+/// A source that will not report a size yields no progress at all rather than an invented
+/// figure; the phase label still says a remux is running.
 [[nodiscard]] Result<std::uint64_t> copy_packets(AVFormatContext* in, AVFormatContext* output,
-                                                 const std::vector<AVRational>& source_timebases) {
+                                                 const std::vector<AVRational>& source_timebases,
+                                                 const FinalizeProgressFn& on_progress) {
     ff::Packet packet;
     if (!packet.alloc()) {
         return FcError::INTERNAL_OUT_OF_MEMORY;
     }
 
+    const std::int64_t source_size = in->pb != nullptr ? avio_size(in->pb) : -1;
+    const bool report = static_cast<bool>(on_progress) && source_size > 0;
+    std::int64_t last_report_ns = timing::qpc_now_ns();
+
     std::uint64_t copied = 0;
     while (av_read_frame(in, packet.get()) >= 0) {
+        // Checked per packet, fired at 10 Hz. `qpc_now_ns` is a `QueryPerformanceCounter`
+        // read -- tens of nanoseconds against the ~8.8 µs per packet BUG-046 measured --
+        // so the guard costs well under 1% of the loop it guards, and the alternative is
+        // ~96,000 pipe writes for a 1.2 GB recording.
+        if (report) {
+            if (const std::int64_t now_ns = timing::qpc_now_ns();
+                now_ns - last_report_ns >= kFinalizeProgressIntervalNs) {
+                last_report_ns = now_ns;
+                if (const std::int64_t position = avio_tell(in->pb); position > 0) {
+                    const double fraction =
+                        std::clamp(static_cast<double>(position) / static_cast<double>(source_size), 0.0, 1.0);
+                    on_progress(FinalizeProgress{
+                        FinalizePhase::Remuxing, finalize_percent(FinalizePhase::Remuxing, fraction),
+                        static_cast<std::uint64_t>(position), static_cast<std::uint64_t>(source_size)});
+                }
+            }
+        }
+
         const auto index = static_cast<unsigned>(packet->stream_index);
         if (index >= output->nb_streams) {
             packet.unref();
@@ -902,7 +935,8 @@ namespace {
 /// `reserved_out`, when given, receives the reservation actually used.
 [[nodiscard]] Result<std::uint64_t> remux_once(const std::filesystem::path& source,
                                                const std::filesystem::path& destination, int audio_initial_padding,
-                                               bool reserve_moov, std::int64_t* reserved_out) {
+                                               bool reserve_moov, std::int64_t* reserved_out,
+                                               const FinalizeProgressFn& on_progress) {
     ff::InputFormatContext input;
     const std::string source_name = source.string();
     if (const int err = input.open(source_name.c_str()); err < 0) {
@@ -1002,36 +1036,10 @@ namespace {
         return FcError::MUX_REMUX_FAILED;
     }
 
-    ff::Packet packet;
-    if (!packet.alloc()) {
-        return FcError::INTERNAL_OUT_OF_MEMORY;
-    }
-
-    std::uint64_t copied = 0;
-    while (av_read_frame(in, packet.get()) >= 0) {
-        const auto index = static_cast<unsigned>(packet->stream_index);
-        if (index >= output->nb_streams) {
-            packet.unref();
-            continue;
-        }
-        // The destination's timebase is whatever `write_header` settled on, which
-        // for MP4 is a per-stream timescale it picks itself. Rescaling from the
-        // source's own units is the same discipline BUG-015 established: never read
-        // the source unit back off the object that owns the destination unit.
-        av_packet_rescale_ts(packet.get(), source_timebases[index], output->streams[index]->time_base);
-        packet->pos = -1;
-
-        if (const int err = av_interleaved_write_frame(output.get(), packet.get()); err < 0) {
-            FC_LOG_ERROR(Subsystem::Mux, "writing a packet during remux failed",
-                         LogFields{}
-                             .add("error", ff::error_text(err))
-                             .add("packets_copied", static_cast<std::int64_t>(copied))
-                             .add_error(FcError::MUX_REMUX_FAILED));
-            return FcError::MUX_REMUX_FAILED;
-        }
-        ++copied;
-        packet.unref();
-    }
+    // One copy loop, in `copy_packets`. It used to be written out again here, which is
+    // how this file ended up with the helper defined and never called -- and would have
+    // meant adding the progress hook to whichever of the two a reader found first.
+    FC_TRY_ASSIGN(const std::uint64_t copied, copy_packets(in, output.get(), source_timebases, on_progress));
 
     // The one call that can refuse specifically because the reservation was too small.
     // movenc logs "reserved_moov_size is too small" and returns EINVAL; the caller retries
@@ -1055,7 +1063,7 @@ namespace {
 } // namespace
 
 Result<void> remux_to_progressive(const std::filesystem::path& source, const std::filesystem::path& destination,
-                                  int audio_initial_padding, RemuxStats* stats) {
+                                  int audio_initial_padding, RemuxStats* stats, const FinalizeProgressFn& on_progress) {
     if (source.empty() || destination.empty() || source == destination) {
         return FcError::INTERNAL_INVALID_ARGUMENT;
     }
@@ -1067,7 +1075,8 @@ Result<void> remux_to_progressive(const std::filesystem::path& source, const std
     // read, which is not a file `Muxer` produces.
     std::int64_t reserved_bytes = 0;
     bool reserved = true;
-    Result<std::uint64_t> copied = remux_once(source, destination, audio_initial_padding, true, &reserved_bytes);
+    Result<std::uint64_t> copied =
+        remux_once(source, destination, audio_initial_padding, true, &reserved_bytes, on_progress);
 
     if (!copied.has_value() || reserved_bytes == 0) {
         // Either the reservation was too small, or the source would not say how long it is
@@ -1079,7 +1088,10 @@ Result<void> remux_to_progressive(const std::filesystem::path& source, const std
                         LogFields{}.add("reserved", reserved_bytes));
             std::error_code ec;
             std::filesystem::remove(destination, ec);
-            copied = remux_once(source, destination, audio_initial_padding, false, nullptr);
+            // The second attempt reports progress too, and it restarts from 0%. A bar
+            // that goes backwards once is honest about a file being written twice;
+            // freezing it at the first attempt's last value would not be.
+            copied = remux_once(source, destination, audio_initial_padding, false, nullptr, on_progress);
         }
         reserved = false;
     }
@@ -1108,8 +1120,67 @@ Result<void> remux_to_progressive(const std::filesystem::path& source, const std
     return ok();
 }
 
+std::string_view to_string(FinalizePhase phase) noexcept {
+    switch (phase) {
+    case FinalizePhase::Flushing:
+        return "flushing";
+    case FinalizePhase::Remuxing:
+        return "remuxing";
+    case FinalizePhase::Validating:
+        return "validating";
+    case FinalizePhase::Swapping:
+        return "swapping";
+    case FinalizePhase::Done:
+        return "done";
+    }
+    return "unknown";
+}
+
+int finalize_percent(FinalizePhase phase, double fraction) noexcept {
+    // Bands, in order. `Remuxing` gets the majority because it is the phase that
+    // actually scales with the file and the only one with real progress inside it;
+    // `Validating` gets a fixed 18 points for BUG-046's fixed ~650-1000 ms.
+    //
+    // Nothing reaches 100 except `Done`, and `Done` is emitted by the caller after the
+    // report says the file is good. A bar at 100% before validation has passed would be
+    // claiming a recording is saved that may yet be rejected.
+    struct Band {
+        int start;
+        int end;
+    };
+
+    const Band band = [phase]() -> Band {
+        switch (phase) {
+        case FinalizePhase::Flushing:
+            return {0, 2};
+        case FinalizePhase::Remuxing:
+            return {2, 80};
+        case FinalizePhase::Validating:
+            return {80, 98};
+        case FinalizePhase::Swapping:
+            return {98, 99};
+        case FinalizePhase::Done:
+            return {100, 100};
+        }
+        return {0, 0};
+    }();
+
+    const double clamped = std::clamp(fraction, 0.0, 1.0);
+    const auto span = static_cast<double>(band.end - band.start);
+    return band.start + static_cast<int>(clamped * span);
+}
+
 Result<ValidationReport> finalize_in_place(const std::filesystem::path& path, const ValidationExpectation& expectation,
-                                           int audio_initial_padding) {
+                                           int audio_initial_padding, const FinalizeProgressFn& on_progress) {
+    // Reported before anything slow starts, so a GUI shows a phase rather than an empty
+    // bar for however long opening a 1.2 GB file takes.
+    const auto report_phase = [&on_progress](FinalizePhase phase) {
+        if (on_progress) {
+            on_progress(FinalizeProgress{phase, finalize_percent(phase, 0.0), 0, 0});
+        }
+    };
+    report_phase(FinalizePhase::Flushing);
+
     // Beside the recording, not in the system temp directory: a rename across
     // volumes is a copy, and the whole point of the swap is that it is atomic.
     std::filesystem::path staged = path;
@@ -1125,7 +1196,9 @@ Result<ValidationReport> finalize_in_place(const std::filesystem::path& path, co
     const std::uint64_t source_bytes = std::filesystem::file_size(path, ec);
     const std::int64_t began_ns = timing::qpc_now_ns();
 
-    if (const Result<void> remuxed = remux_to_progressive(path, staged, audio_initial_padding); !remuxed.has_value()) {
+    report_phase(FinalizePhase::Remuxing);
+    if (const Result<void> remuxed = remux_to_progressive(path, staged, audio_initial_padding, nullptr, on_progress);
+        !remuxed.has_value()) {
         std::filesystem::remove(staged, ec);
         return remuxed.error();
     }
@@ -1134,6 +1207,7 @@ Result<ValidationReport> finalize_in_place(const std::filesystem::path& path, co
     // SPEC.md §10.3: "verify the output with a decode-probe before deleting the
     // source." The fragmented original is a working recording, and it is not given
     // up for one that has not proven itself.
+    report_phase(FinalizePhase::Validating);
     FC_TRY_ASSIGN(const ValidationReport report, Muxer::validate(staged, expectation));
     const std::int64_t validated_ns = timing::qpc_now_ns();
     if (!report.valid) {
@@ -1146,6 +1220,7 @@ Result<ValidationReport> finalize_in_place(const std::filesystem::path& path, co
     // `MoveFileEx` with REPLACE_EXISTING is the atomic swap; `WRITE_THROUGH` makes
     // it durable before returning, so a power cut cannot leave the directory entry
     // updated and the data behind it not.
+    report_phase(FinalizePhase::Swapping);
     if (MoveFileExW(staged.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
         const DWORD error = GetLastError();
         std::filesystem::remove(staged, ec);

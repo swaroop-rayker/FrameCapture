@@ -155,6 +155,15 @@ struct PipelineSettings {
     /// Zero on every production path -- see `mux::MuxerSettings::injected_stall_ns`.
     std::int64_t injected_stall_ns = 0;
     int injected_stall_period = 20;
+
+    /// Called during `stop()`'s finalization with SPEC.md §10.4's stage and how far it
+    /// has got (M9.6 §2.1). Null on every path that has nobody to tell -- the tests, and
+    /// the recovery path, which finalizes a file whose recording session is long gone.
+    ///
+    /// Invoked on whichever thread called `stop()`, which is the IPC request thread. It
+    /// is never a capture, encode or audio thread: those have been joined by the time
+    /// finalization begins, which is what makes a callback here safe at all.
+    mux::FinalizeProgressFn on_finalize_progress;
 };
 
 /// Counters for the health monitor (M6) and for tests.

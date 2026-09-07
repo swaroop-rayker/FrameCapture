@@ -127,6 +127,73 @@ struct UpdateSettings {
     bool check_enabled = true;
 };
 
+/// SPEC.md §16.5's rebindable global hotkeys (M9.6 F3).
+///
+/// **The engine stores these and never acts on them.** `RegisterHotKey` is the GUI's --
+/// §16.5 says so, and the engine has no message pump to receive `WM_HOTKEY` on. What the
+/// engine owns is the file, per §17, so the GUI reads these through `get_config` and
+/// writes them through `save_config` like every other setting.
+///
+/// Sequences are stored as the user writes them (`"Ctrl+Shift+F9"`). Nothing here
+/// validates them: whether a sequence is *parseable* is `hotkeys.parse_sequence`'s
+/// question and whether it is *bindable* is Windows', and neither can be answered from
+/// this process. An unparseable sequence is reported by the GUI and costs one
+/// accelerator, not a failed load.
+struct HotkeySettings {
+    bool enabled = true;
+    std::string start = "Ctrl+Shift+F9";
+    /// Defaults to `start`'s sequence: one binding, dispatched as a toggle by current
+    /// state. That is the behaviour this project shipped with, expressed so the two
+    /// actions can be separated by anyone who wants them separate.
+    std::string stop = "Ctrl+Shift+F9";
+    std::string pause_resume = "Ctrl+Shift+F10";
+};
+
+/// The on-screen overlay's placement and behaviour (M9.6 F1, F2).
+///
+/// Also stored-not-acted-on: the pill and the toasts are GUI windows. What makes them
+/// *safe* -- `WDA_EXCLUDEFROMCAPTURE`, so nothing here reaches the recording -- is the
+/// GUI's `overlay.exclusion` module, and no engine code participates.
+struct OverlaySettings {
+    bool pill_enabled = true;
+    OverlayCorner pill_corner = OverlayCorner::BottomRight;
+    /// Display device path of the monitor to place the pill on, or empty for "whichever
+    /// monitor is being captured". A path rather than an index, for SPEC.md §4.1's
+    /// reason: indices reshuffle on hotplug.
+    std::string pill_monitor;
+    /// Virtual-desktop coordinates of the pill's top-left, or -1 for "never dragged;
+    /// use `pill_corner`". See the schema table for why -1 rather than 0.
+    int pill_x = -1;
+    int pill_y = -1;
+
+    bool toasts_enabled = true;
+    OverlayCorner toast_corner = OverlayCorner::TopRight;
+    /// How long an informational toast stays up. Warnings get longer and errors stay
+    /// until dismissed; both are the GUI's policy, and this is the number they scale.
+    int toast_duration_s = 4;
+    int toast_max_visible = 4;
+};
+
+/// Which parts of the main window are on screen (M9.6 Phase 4, SPEC.md §16.2).
+///
+/// Stored-not-acted-on, like `HotkeySettings` and `OverlaySettings` above: the engine
+/// has no window. What it owns is the file (§17), and the View menu's toggles have to
+/// survive a restart to be worth having -- a layout that resets every launch is a
+/// layout the user stops adjusting.
+///
+/// All-true defaults, because §16.2 draws the whole window and a panel is absent only
+/// when a user chose to hide it. `always_on_top` is the exception and defaults off: it
+/// changes how the window behaves against every *other* application on the machine, and
+/// that is not a default anyone asked for.
+struct WindowSettings {
+    bool show_preview = true;
+    bool show_sources = true;
+    bool show_audio_mixer = true;
+    bool show_controls = true;
+    bool show_status = true;
+    bool always_on_top = false;
+};
+
 /// The validated configuration, plus the document it came from.
 ///
 /// The raw document is retained deliberately. Saving rewrites the *known* keys
@@ -142,6 +209,9 @@ struct Config {
     SegmentationSettings segmentation;
     AdvancedSettings advanced;
     UpdateSettings updates;
+    HotkeySettings hotkeys;
+    OverlaySettings overlay;
+    WindowSettings window;
 
     /// Everything that was in the file, including unrecognised keys.
     toml::table document;

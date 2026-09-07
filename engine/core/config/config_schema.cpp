@@ -85,10 +85,17 @@ constexpr std::array kLogLevels{
     Naming<LogLevelSetting>{LogLevelSetting::Critical, "critical"},
 };
 
+constexpr std::array kOverlayCorners{
+    Naming<OverlayCorner>{OverlayCorner::TopLeft, "top-left"},
+    Naming<OverlayCorner>{OverlayCorner::TopRight, "top-right"},
+    Naming<OverlayCorner>{OverlayCorner::BottomLeft, "bottom-left"},
+    Naming<OverlayCorner>{OverlayCorner::BottomRight, "bottom-right"},
+};
+
 // clang-format off
 constexpr std::array kSchema{
     // path                              type                     min      max        allowed                              default                              since
-    KeySpec{"schema_version",            KeyType::Integer,          1,      1000,     "",                                  "1",                                   1},
+    KeySpec{"schema_version",            KeyType::Integer,          1,      1000,     "",                                  "2",                                   1},
 
     // [general] -- SPEC.md §16.4
     KeySpec{"general.output_directory",   KeyType::Path,             0,         0,     "",                                  "<Videos>\\FrameCapture",              1},
@@ -135,6 +142,53 @@ constexpr std::array kSchema{
 
     // [updates] -- SPEC.md §21.3
     KeySpec{"updates.check_enabled",      KeyType::Boolean,          0,         0,     "",                                  "true",                                1},
+
+    // [hotkeys] -- SPEC.md §16.5, M9.6 F3. Sequences are validated by the GUI, which is
+    // what calls `RegisterHotKey` and is therefore the only thing that can tell a
+    // well-formed binding from a bindable one. Stored as free strings for that reason:
+    // a schema `allowed` list would have to enumerate every key combination there is.
+    //
+    // `start` and `stop` share a default deliberately -- that one sequence is the
+    // start/stop toggle this project shipped with, and expressing it as two identical
+    // bindings is what keeps it working while making the two actions separable.
+    KeySpec{"hotkeys.enabled",            KeyType::Boolean,          0,         0,     "",                                  "true",                                2},
+    KeySpec{"hotkeys.start",              KeyType::String,           0,         0,     "",                                  "Ctrl+Shift+F9",                       2},
+    KeySpec{"hotkeys.stop",               KeyType::String,           0,         0,     "",                                  "Ctrl+Shift+F9",                       2},
+    KeySpec{"hotkeys.pause_resume",       KeyType::String,           0,         0,     "",                                  "Ctrl+Shift+F10",                      2},
+
+    // [overlay] -- M9.6 F1 and F2. Drawn by the GUI, stored here because §17 makes this
+    // file the single source of truth for settings.
+    //
+    // `pill_x`/`pill_y` are -1 until the user drags the pill somewhere, at which point
+    // they are virtual-desktop coordinates. -1 rather than 0 because 0,0 is a real
+    // position -- the top-left of the primary monitor -- and "unplaced" has to be
+    // distinguishable from "placed in the corner the user happened to drag it to".
+    KeySpec{"overlay.pill_enabled",       KeyType::Boolean,          0,         0,     "",                                  "true",                                2},
+    KeySpec{"overlay.pill_corner",        KeyType::Enum,             0,         0,     "top-left,top-right,bottom-left,bottom-right", "bottom-right",              2},
+    KeySpec{"overlay.pill_monitor",       KeyType::String,           0,         0,     "",                                  "\"\" (the captured monitor)",         2},
+    KeySpec{"overlay.pill_x",             KeyType::Integer,      -32768,     32767,     "",                                  "-1 (unplaced)",                       2},
+    KeySpec{"overlay.pill_y",             KeyType::Integer,      -32768,     32767,     "",                                  "-1 (unplaced)",                       2},
+    KeySpec{"overlay.toasts_enabled",     KeyType::Boolean,          0,         0,     "",                                  "true",                                2},
+    KeySpec{"overlay.toast_corner",       KeyType::Enum,             0,         0,     "top-left,top-right,bottom-left,bottom-right", "top-right",                 2},
+    KeySpec{"overlay.toast_duration_s",   KeyType::Integer,          1,        60,     "",                                  "4",                                   2},
+    KeySpec{"overlay.toast_max_visible",  KeyType::Integer,          1,         8,     "",                                  "4",                                   2},
+
+    // [window] -- M9.6 Phase 4's View menu. Which parts of the main window are shown.
+    //
+    // Stored for the same reason [hotkeys] and [overlay] are: the engine never reads
+    // these, and §17 makes this file the only settings store, so a second one for the
+    // GUI's own keys would be the second source of truth §17 exists to prevent.
+    //
+    // Every one defaults to true. The window §16.2 specifies is the whole window, and a
+    // panel is hidden only because a user hid it -- so a config file with no [window]
+    // section, which is every file written before this milestone, loads the layout the
+    // spec draws.
+    KeySpec{"window.show_preview",        KeyType::Boolean,          0,         0,     "",                                  "true",                                2},
+    KeySpec{"window.show_sources",        KeyType::Boolean,          0,         0,     "",                                  "true",                                2},
+    KeySpec{"window.show_audio_mixer",    KeyType::Boolean,          0,         0,     "",                                  "true",                                2},
+    KeySpec{"window.show_controls",       KeyType::Boolean,          0,         0,     "",                                  "true",                                2},
+    KeySpec{"window.show_status",         KeyType::Boolean,          0,         0,     "",                                  "true",                                2},
+    KeySpec{"window.always_on_top",       KeyType::Boolean,          0,         0,     "",                                  "false",                               2},
 };
 // clang-format on
 
@@ -208,6 +262,10 @@ std::string_view to_string(LogLevelSetting value) noexcept {
     return name_of(kLogLevels, value);
 }
 
+std::string_view to_string(OverlayCorner value) noexcept {
+    return name_of(kOverlayCorners, value);
+}
+
 std::optional<Container> container_from_string(std::string_view text) noexcept {
     return value_of(kContainers, text);
 }
@@ -238,6 +296,10 @@ std::optional<CaptureBackend> capture_backend_from_string(std::string_view text)
 
 std::optional<LogLevelSetting> log_level_from_string(std::string_view text) noexcept {
     return value_of(kLogLevels, text);
+}
+
+std::optional<OverlayCorner> overlay_corner_from_string(std::string_view text) noexcept {
+    return value_of(kOverlayCorners, text);
 }
 
 std::span<const KeySpec> schema_keys() noexcept {

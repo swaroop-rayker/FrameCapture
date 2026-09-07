@@ -4,6 +4,7 @@
 #include "core/logging/logger.h"
 
 #include <algorithm>
+#include <array>
 #include <system_error>
 
 namespace fc::config {
@@ -14,13 +15,41 @@ const MigrationStep* find_step(std::span<const MigrationStep> steps, int from) {
     return it != steps.end() ? &*it : nullptr;
 }
 
+/// v1 -> v2 (M9.6): `[hotkeys]`, `[overlay]` and `[window]` arrive.
+///
+/// **It writes nothing, and that is the whole step.** Both sections are new, every key in
+/// them has a default, and `validate` supplies a default for any key a document does not
+/// carry -- so a v1 file read as v2 already produces exactly the values this function
+/// would insert. Writing them here would mean a migrated file has the keys spelled out
+/// while a fresh one does not, and `serialize` then has two shapes to be correct about.
+///
+/// What it therefore *is* is the version stamp and the backup, both of which
+/// `run_migrations` does around it. That is not nothing: the backup is what SPEC.md §17
+/// promises a user before their file is rewritten, and a v1 file loaded by this build is
+/// rewritten the moment any setting is saved.
+///
+/// The alternative -- leaving `builtin_migrations()` empty and simply accepting a v1
+/// document -- was rejected. `run_migrations` refuses a version it has no step for,
+/// deliberately, because a silent version bump is how a document ends up at an
+/// intermediate shape with the header claiming otherwise. A step that transforms nothing
+/// is still a link in the chain, and the chain's value is that every link is present.
+[[nodiscard]] Result<void> migrate_1_to_2(toml::table& document) {
+    static_cast<void>(document);
+    return ok();
+}
+
 } // namespace
 
 std::span<const MigrationStep> builtin_migrations() {
-    // Empty by design -- see the header. Do not add a placeholder step here just to
-    // make the chain non-empty; an identity migration that bumps the version would
-    // hide a genuinely missing transformation later.
-    return {};
+    // Function-local rather than a namespace-scope `constexpr`: `MigrationStep` holds a
+    // `std::function`, which has no constant initialisation, and a namespace-scope
+    // non-constexpr array would be a static initialisation order problem waiting for its
+    // first caller from another translation unit.
+    static const std::array kBuiltinMigrations{
+        MigrationStep{1, 2, "migrate_1_to_2", "adds [hotkeys], [overlay] and [window]; all default-only",
+                      migrate_1_to_2},
+    };
+    return {kBuiltinMigrations.data(), kBuiltinMigrations.size()};
 }
 
 std::filesystem::path backup_path_for(const std::filesystem::path& config_path, int version) {

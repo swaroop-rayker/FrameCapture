@@ -384,13 +384,20 @@ def test_a_hotkey_without_a_modifier_is_refused() -> None:
 
 
 def test_an_unknown_part_is_refused_rather_than_dropped() -> None:
-    """Silently ignoring a modifier registers a *different* hotkey than the one asked for."""
+    """Silently ignoring a modifier registers a *different* hotkey than the one asked for.
+
+    `Ctrl+PrintScreen` used to be one of the cases here, and it is now **bindable**: the
+    virtual-key table held only F1-F24, A-Z and 0-9, and that incompleteness was a
+    reported cause of "the hotkey does nothing" (M9.6 F3). The rule this asserts is
+    unchanged -- a part that cannot be named is refused rather than dropped -- so the
+    case moved to a key that genuinely has no name.
+    """
     from framecapture_gui.hotkeys import HotkeyError, parse_sequence
 
     with pytest.raises(HotkeyError):
         parse_sequence("Hyper+F9")
     with pytest.raises(HotkeyError):
-        parse_sequence("Ctrl+PrintScreen")
+        parse_sequence("Ctrl+F25")  # the table stops at F24
     with pytest.raises(HotkeyError):
         parse_sequence("")
 
@@ -402,15 +409,20 @@ def test_a_conflicting_hotkey_is_reported_and_not_fatal(qapp: QCoreApplication) 
     registration is exactly what a user hits when another application owns the key.
     """
     del qapp
-    from framecapture_gui.hotkeys import Hotkey, HotkeyManager
+    from framecapture_gui.hotkeys import Action, BindingState, Hotkey, HotkeyManager
 
     first = HotkeyManager()
     second = HotkeyManager()
     try:
-        assert first.register([Hotkey("Test", "Ctrl+Alt+Shift+F24", lambda: None)]) == []
-        conflicts = second.register([Hotkey("Test", "Ctrl+Alt+Shift+F24", lambda: None)])
-        assert conflicts, "a duplicate registration was not reported as a conflict"
-        assert "Test" in conflicts[0]
+        taken = first.apply([Hotkey(Action.START, "Ctrl+Alt+Shift+F24", lambda: None)])
+        assert taken[Action.START].ok
+
+        statuses = second.apply([Hotkey(Action.START, "Ctrl+Alt+Shift+F24", lambda: None)])
+        assert statuses[Action.START].state is BindingState.CONFLICT
+        # Kept, rather than returned once and forgotten -- the settings dialog reads it
+        # long after this call (M9.6 F3).
+        assert second.statuses()[Action.START].state is BindingState.CONFLICT
+        assert second.conflicts, "a duplicate registration was not reported as a conflict"
     finally:
         first.unregister_all()
         second.unregister_all()

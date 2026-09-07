@@ -1,0 +1,107 @@
+# The hardware tier, on the reference rig (M9.6 plan §7.2).
+#
+# SPEC.md §20.1 splits the suite for one reason: "hosted runners have no real GPU and will
+# silently pass meaningless tests". Everything here needs a real adapter, a real display
+# and a real WASAPI endpoint, so it runs on the machine that has them and nowhere else.
+#
+# ---------------------------------------------------------------------------
+# THIS TIER MAKES NOISE.
+# ---------------------------------------------------------------------------
+# `RealTargetTest.*` and SPEC.md §20 row 15 play audible tones through the speakers, and
+# several cases put a full-screen test pattern on the display. `fc_audio_target` is a real
+# WASAPI render client -- §8.6's per-application capture is keyed on a process id, so there
+# is no way to exercise it without a process actually playing something (CLAUDE.md §3).
+#
+# The nightly schedule is 03:00 UTC. On a rig that is somebody's daily driver, that is a
+# machine making noise in the middle of the night; change the cron or drop the schedule
+# and keep workflow_dispatch if that is not wanted.
+#
+# ---------------------------------------------------------------------------
+# NO pull_request TRIGGER, DELIBERATELY.
+# ---------------------------------------------------------------------------
+# A self-hosted runner that executes code from a pull request is arbitrary code execution
+# on the owner's machine, and a fork PR is code from a stranger. There is no `if:` guard
+# to get wrong here because the trigger simply does not exist -- which is the only version
+# of this that cannot be defeated by editing a condition.
+
+name: GPU tier
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  # One at a time on the rig, and never cancel a run in flight: a half-killed recording
+  # leaves a device open and the next run inherits it.
+  group: framecapture-rig
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gpu:
+    name: GPU and capture tests
+    runs-on: [self-hosted, windows, framecapture-rig]
+    timeout-minutes: 90
+    steps:
+      - name: Normalise line endings before checkout
+        shell: pwsh
+        run: git config --global core.autocrlf input
+
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Bootstrap
+        shell: pwsh
+        run: .\scripts\bootstrap.ps1
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset windows-msvc-release
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset windows-msvc-release --parallel
+
+      - name: Test — full suite, both tiers
+        shell: pwsh
+        run: |
+          # Unfiltered. SPEC.md §21.2 makes the unfiltered run the contract; the split
+          # forms in CLAUDE.md §3 are for iterating.
+          #
+          # Nothing else may run concurrently. Three attempts during M9.6 were invalidated
+          # by the environment rather than the code: one started alongside the pytest
+          # engine suite, one alongside lint.ps1 whose clang-tidy runs 16-way and starved
+          # the encoder, and two against a locked workstation -- a locked session
+          # composites the secure desktop, so WGC captures a static screen. The
+          # `concurrency` group above is what keeps this workflow from doing it to itself.
+          ctest --preset windows-msvc-release --output-on-failure
+
+      - name: Test — the GPU tier in one process
+        shell: pwsh
+        run: |
+          # The same tests again, in a single process. This is not redundant: BUG-049 was
+          # a flaky green that passed per-process under ctest and failed when the suite
+          # shared one process, because DDA re-emits an unpopulated copy target on timeout
+          # and the test asserted on those frames. Per-process isolation hid it.
+          .\build\windows-msvc-release\bin\fc_gpu_tests.exe
+
+      - name: Test — Python, including the engine-backed cases
+        shell: pwsh
+        run: |
+          # The whole suite here, unlike ci.yml: the `engine` marker spawns a real engine
+          # and records, which needs this machine.
+          $python = Join-Path $env:LOCALAPPDATA 'FrameCapture\tools\guivenv\Scripts\python.exe'
+          & $python -m pytest gui/tests -v --junitxml=junit-gpu.xml
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-logs
+          path: |
+            build/windows-msvc-release/Testing/**/LastTest.log
+            junit-gpu.xml
+          if-no-files-found: ignore

@@ -2,11 +2,13 @@
 
 #include "core/audio/loopback_capture.h"
 #include "core/audio/process_loopback.h"
+#include "core/build_info.h"
 #include "core/capture/source_resolver.h"
 #include "core/config/config_schema.h"
 #include "core/gpu/gpu_topology.h"
 #include "core/logging/log_fields.h"
 #include "core/logging/logger.h"
+#include "core/mux/muxer.h"
 #include "core/mux/recovery.h"
 #include "core/timing/qpc_clock.h"
 #include "core/util/thread_utils.h"
@@ -112,6 +114,14 @@ struct EngineService::Impl {
     [[nodiscard]] std::string handle(const Request& request);
     void stats_loop();
     void publish_state(RecordingState next);
+
+    /// SPEC.md §10.4's finalization stages, as a `finalize_progress` event (M9.6 §2.1).
+    ///
+    /// Called on the request thread from inside `stop_record`. Takes no lock: the only
+    /// state it touches is `current_output`, which nothing writes while a stop is in
+    /// flight -- `handle_stop_record` moved the session out under the mutex before
+    /// finalization began, so no `start_record` can be running concurrently.
+    void publish_finalize_progress(const mux::FinalizeProgress& progress);
 
     /// Finalizes whatever is recording, on any exit path. Idempotent.
     void finalize_for_exit();
@@ -230,6 +240,34 @@ nlohmann::json EngineService::Impl::config_payload() const {
     body["gpu_override"] = config.advanced.gpu_override;
 
     body["check_updates"] = config.updates.check_enabled;
+
+    // SPEC.md §16.5's hotkeys and M9.6's overlay. The engine stores both and acts on
+    // neither -- `RegisterHotKey` and the overlay windows are the GUI's -- but §17 makes
+    // this file the only settings store, so this is how the GUI reads them back.
+    body["hotkeys_enabled"] = config.hotkeys.enabled;
+    body["hotkey_start"] = config.hotkeys.start;
+    body["hotkey_stop"] = config.hotkeys.stop;
+    body["hotkey_pause_resume"] = config.hotkeys.pause_resume;
+
+    body["pill_enabled"] = config.overlay.pill_enabled;
+    body["pill_corner"] = std::string{config::to_string(config.overlay.pill_corner)};
+    body["pill_monitor"] = config.overlay.pill_monitor;
+    body["pill_x"] = config.overlay.pill_x;
+    body["pill_y"] = config.overlay.pill_y;
+    body["toasts_enabled"] = config.overlay.toasts_enabled;
+    body["toast_corner"] = std::string{config::to_string(config.overlay.toast_corner)};
+    body["toast_duration_s"] = config.overlay.toast_duration_s;
+    body["toast_max_visible"] = config.overlay.toast_max_visible;
+
+    // M9.6 Phase 4's View menu. Same arrangement again: stored here, acted on only by
+    // the GUI.
+    body["show_preview"] = config.window.show_preview;
+    body["show_sources"] = config.window.show_sources;
+    body["show_audio_mixer"] = config.window.show_audio_mixer;
+    body["show_controls"] = config.window.show_controls;
+    body["show_status"] = config.window.show_status;
+    body["always_on_top"] = config.window.always_on_top;
+
     body["schema_version"] = config.schema_version;
     return body;
 }
@@ -260,6 +298,26 @@ void EngineService::Impl::apply_config_params(config::Config& target, const nloh
     target.advanced.gpu_override = field_or<std::string>(params, "gpu_override", target.advanced.gpu_override);
     target.updates.check_enabled = field_or<bool>(params, "check_updates", target.updates.check_enabled);
 
+    target.hotkeys.enabled = field_or<bool>(params, "hotkeys_enabled", target.hotkeys.enabled);
+    target.hotkeys.start = field_or<std::string>(params, "hotkey_start", target.hotkeys.start);
+    target.hotkeys.stop = field_or<std::string>(params, "hotkey_stop", target.hotkeys.stop);
+    target.hotkeys.pause_resume = field_or<std::string>(params, "hotkey_pause_resume", target.hotkeys.pause_resume);
+
+    target.overlay.pill_enabled = field_or<bool>(params, "pill_enabled", target.overlay.pill_enabled);
+    target.overlay.pill_monitor = field_or<std::string>(params, "pill_monitor", target.overlay.pill_monitor);
+    target.overlay.pill_x = field_or<int>(params, "pill_x", target.overlay.pill_x);
+    target.overlay.pill_y = field_or<int>(params, "pill_y", target.overlay.pill_y);
+    target.overlay.toasts_enabled = field_or<bool>(params, "toasts_enabled", target.overlay.toasts_enabled);
+    target.overlay.toast_duration_s = field_or<int>(params, "toast_duration_s", target.overlay.toast_duration_s);
+    target.overlay.toast_max_visible = field_or<int>(params, "toast_max_visible", target.overlay.toast_max_visible);
+
+    target.window.show_preview = field_or<bool>(params, "show_preview", target.window.show_preview);
+    target.window.show_sources = field_or<bool>(params, "show_sources", target.window.show_sources);
+    target.window.show_audio_mixer = field_or<bool>(params, "show_audio_mixer", target.window.show_audio_mixer);
+    target.window.show_controls = field_or<bool>(params, "show_controls", target.window.show_controls);
+    target.window.show_status = field_or<bool>(params, "show_status", target.window.show_status);
+    target.window.always_on_top = field_or<bool>(params, "always_on_top", target.window.always_on_top);
+
     // The enum-valued keys go through the schema's own parsers, so an unrecognised
     // spelling keeps the current value rather than silently selecting the first
     // enumerator. `configure` used to hand-roll the container comparison, which meant
@@ -289,6 +347,16 @@ void EngineService::Impl::apply_config_params(config::Config& target, const nloh
             target.advanced.log_level = *parsed;
         }
     }
+    if (const auto text = field_or<std::string>(params, "pill_corner", {}); !text.empty()) {
+        if (const auto parsed = config::overlay_corner_from_string(text); parsed.has_value()) {
+            target.overlay.pill_corner = *parsed;
+        }
+    }
+    if (const auto text = field_or<std::string>(params, "toast_corner", {}); !text.empty()) {
+        if (const auto parsed = config::overlay_corner_from_string(text); parsed.has_value()) {
+            target.overlay.toast_corner = *parsed;
+        }
+    }
 }
 
 void EngineService::Impl::publish_state(RecordingState next) {
@@ -301,6 +369,20 @@ void EngineService::Impl::publish_state(RecordingState next) {
     // SPEC.md §15.1: paused is a `state_changed` value, not an event of its own,
     // "because a paused recording that looks like a running one loses footage silently".
     pipe.send_event(Event::StateChanged, body);
+}
+
+void EngineService::Impl::publish_finalize_progress(const mux::FinalizeProgress& progress) {
+    nlohmann::json body = nlohmann::json::object();
+    body["phase"] = std::string{to_string(progress.phase)};
+    body["percent"] = progress.percent;
+    // Zero in every phase but the remux, which is the signal that the phase has no byte
+    // progress behind it. Sent anyway rather than omitted: a field that is sometimes
+    // absent makes the reader's job conditional for no gain, and 0/0 already says
+    // "nothing to divide" unambiguously.
+    body["bytes_done"] = progress.bytes_done;
+    body["bytes_total"] = progress.bytes_total;
+    body["output"] = current_output.string();
+    pipe.send_event(Event::FinalizeProgress, body);
 }
 
 nlohmann::json EngineService::Impl::stats_payload() {
@@ -677,6 +759,18 @@ std::string EngineService::Impl::handle_start_record(const Request& request) {
     // recording fail for a reason no user could act on.
     stop_preview_session_locked();
 
+    // SPEC.md §10.4's stages, forwarded to the GUI as they happen (M9.6 §2.1). Called on
+    // the request thread inside `stop_record`, which is why it captures `this` safely:
+    // `Impl` outlives every session it creates, and the only caller is a session being
+    // stopped by a method of this object.
+    //
+    // The output path is carried in each event rather than left to the GUI to remember.
+    // A GUI that reconnected mid-recording has never seen a `start_record` response and
+    // would otherwise have no name to put next to the progress bar.
+    session_settings.on_finalize_progress = [this](const mux::FinalizeProgress& progress) {
+        publish_finalize_progress(progress);
+    };
+
     session = std::make_unique<pipeline::RecordingSession>();
     const Result<void> started = session->start(session_settings);
     if (!started.has_value()) {
@@ -742,6 +836,16 @@ std::string EngineService::Impl::handle_stop_record(const Request& request) {
     result["duration_s"] = report.value().duration_seconds;
     result["decoded_frames"] = report.value().decoded_frames;
     result["format"] = report.value().format_name;
+    result["detail"] = report.value().detail;
+
+    // The terminal phase, and only for a file that passed the gate (M9.6 §2.1). A bar
+    // reaching 100% is the claim that the recording is saved, and a file that failed
+    // validation is not saved -- it is a file the user has to be told about. That case
+    // travels as `recording_finalized` with `valid: false`, which the GUI renders as a
+    // failure rather than as a completed save.
+    if (report.value().valid) {
+        publish_finalize_progress(mux::FinalizeProgress{mux::FinalizePhase::Done, 100, 0, 0});
+    }
 
     pipe.send_event(Event::RecordingFinalized, result);
     return make_response(request.id, result);
@@ -764,6 +868,11 @@ std::string EngineService::Impl::handle(const Request& request) {
         nlohmann::json result = nlohmann::json::object();
         result["proto"] = std::string{kProtocolVersion};
         result["engine"] = std::string{"framecapture-engine"};
+        // The binary's own version, so a bug report names the build that recorded the
+        // file rather than the GUI that was pointed at it -- the two are separate
+        // artefacts with separate version numbers. Additive under §15.1's compatibility
+        // rule: a GUI that does not read it is unaffected.
+        result["version"] = std::string{project_version()};
         result["capabilities"] = engine_capabilities();
         result["session"] = pipe.session_id();
         return make_response(request.id, result);

@@ -1500,8 +1500,18 @@ Result<mux::ValidationReport> VideoPipeline::stop() {
     // The *last* file, which is `settings.output` only when nothing split (SPEC.md §11).
     const std::filesystem::path& final_path = impl_->current_segment_path;
     const bool remuxed = impl_->muxer->needs_remux();
+    const mux::FinalizeProgressFn& on_progress = impl_->settings.on_finalize_progress;
+
+    // MKV takes the `validate` branch, which has no remux and therefore no phase
+    // boundaries of its own to report. Announced here so the phase is still `Validating`
+    // rather than nothing at all for the ~650-1000 ms BUG-046 measured it at -- an MKV
+    // stop is not instant, and a GUI told nothing would show an empty bar for a second.
+    if (!remuxed && on_progress) {
+        on_progress(mux::FinalizeProgress{mux::FinalizePhase::Validating,
+                                          mux::finalize_percent(mux::FinalizePhase::Validating, 0.0), 0, 0});
+    }
     FC_TRY_ASSIGN(const mux::ValidationReport report,
-                  remuxed ? mux::finalize_in_place(final_path, expectation, audio_initial_padding)
+                  remuxed ? mux::finalize_in_place(final_path, expectation, audio_initial_padding, on_progress)
                           : mux::Muxer::validate(final_path, expectation));
     if (!report.valid) {
         // Returned rather than collapsed into a bare error code. The caller needs

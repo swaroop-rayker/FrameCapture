@@ -39,6 +39,7 @@ add_executable(fc_tests
     unit/test_bounded_queue.cpp
     unit/test_drift_compensator.cpp
     unit/test_fc_error.cpp
+    unit/test_finalize_progress.cpp
     unit/test_frame_pacer.cpp
     unit/test_gui_watchdog.cpp
     unit/test_health_monitor.cpp
@@ -143,6 +144,7 @@ add_executable(fc_gpu_tests
     integration/test_sustained_60fps.cpp
     integration/test_throughput.cpp
     integration/test_orphan_prevention.cpp
+    integration/test_overlay_exclusion.cpp
     integration/test_pause_resume.cpp
     integration/test_preview.cpp
     integration/test_second_recording.cpp

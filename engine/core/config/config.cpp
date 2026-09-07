@@ -349,6 +349,34 @@ Config validate(const toml::table& document, std::vector<Warning>& warnings) {
 
     config.updates.check_enabled = read_bool(document, "updates.check_enabled", config.updates.check_enabled, warnings);
 
+    config.hotkeys.enabled = read_bool(document, "hotkeys.enabled", config.hotkeys.enabled, warnings);
+    config.hotkeys.start = read_string(document, "hotkeys.start", config.hotkeys.start, warnings);
+    config.hotkeys.stop = read_string(document, "hotkeys.stop", config.hotkeys.stop, warnings);
+    config.hotkeys.pause_resume = read_string(document, "hotkeys.pause_resume", config.hotkeys.pause_resume, warnings);
+
+    config.overlay.pill_enabled = read_bool(document, "overlay.pill_enabled", config.overlay.pill_enabled, warnings);
+    config.overlay.pill_corner =
+        read_enum(document, "overlay.pill_corner", config.overlay.pill_corner, overlay_corner_from_string, warnings);
+    config.overlay.pill_monitor = read_string(document, "overlay.pill_monitor", config.overlay.pill_monitor, warnings);
+    config.overlay.pill_x = static_cast<int>(read_integer(document, "overlay.pill_x", config.overlay.pill_x, warnings));
+    config.overlay.pill_y = static_cast<int>(read_integer(document, "overlay.pill_y", config.overlay.pill_y, warnings));
+    config.overlay.toasts_enabled =
+        read_bool(document, "overlay.toasts_enabled", config.overlay.toasts_enabled, warnings);
+    config.overlay.toast_corner =
+        read_enum(document, "overlay.toast_corner", config.overlay.toast_corner, overlay_corner_from_string, warnings);
+    config.overlay.toast_duration_s =
+        static_cast<int>(read_integer(document, "overlay.toast_duration_s", config.overlay.toast_duration_s, warnings));
+    config.overlay.toast_max_visible = static_cast<int>(
+        read_integer(document, "overlay.toast_max_visible", config.overlay.toast_max_visible, warnings));
+
+    config.window.show_preview = read_bool(document, "window.show_preview", config.window.show_preview, warnings);
+    config.window.show_sources = read_bool(document, "window.show_sources", config.window.show_sources, warnings);
+    config.window.show_audio_mixer =
+        read_bool(document, "window.show_audio_mixer", config.window.show_audio_mixer, warnings);
+    config.window.show_controls = read_bool(document, "window.show_controls", config.window.show_controls, warnings);
+    config.window.show_status = read_bool(document, "window.show_status", config.window.show_status, warnings);
+    config.window.always_on_top = read_bool(document, "window.always_on_top", config.window.always_on_top, warnings);
+
     report_unknown_keys(document, {}, warnings);
 
     config.document = document;
@@ -518,6 +546,28 @@ std::string serialize(const Config& config) {
     assign_node(document, "advanced.gpu_override", config.advanced.gpu_override);
 
     assign_node(document, "updates.check_enabled", config.updates.check_enabled);
+
+    assign_node(document, "hotkeys.enabled", config.hotkeys.enabled);
+    assign_node(document, "hotkeys.start", config.hotkeys.start);
+    assign_node(document, "hotkeys.stop", config.hotkeys.stop);
+    assign_node(document, "hotkeys.pause_resume", config.hotkeys.pause_resume);
+
+    assign_node(document, "overlay.pill_enabled", config.overlay.pill_enabled);
+    assign_node(document, "overlay.pill_corner", std::string{to_string(config.overlay.pill_corner)});
+    assign_node(document, "overlay.pill_monitor", config.overlay.pill_monitor);
+    assign_node(document, "overlay.pill_x", static_cast<std::int64_t>(config.overlay.pill_x));
+    assign_node(document, "overlay.pill_y", static_cast<std::int64_t>(config.overlay.pill_y));
+    assign_node(document, "overlay.toasts_enabled", config.overlay.toasts_enabled);
+    assign_node(document, "overlay.toast_corner", std::string{to_string(config.overlay.toast_corner)});
+    assign_node(document, "overlay.toast_duration_s", static_cast<std::int64_t>(config.overlay.toast_duration_s));
+    assign_node(document, "overlay.toast_max_visible", static_cast<std::int64_t>(config.overlay.toast_max_visible));
+
+    assign_node(document, "window.show_preview", config.window.show_preview);
+    assign_node(document, "window.show_sources", config.window.show_sources);
+    assign_node(document, "window.show_audio_mixer", config.window.show_audio_mixer);
+    assign_node(document, "window.show_controls", config.window.show_controls);
+    assign_node(document, "window.show_status", config.window.show_status);
+    assign_node(document, "window.always_on_top", config.window.always_on_top);
 
     std::ostringstream out;
     out << "# FrameCapture configuration.\n"

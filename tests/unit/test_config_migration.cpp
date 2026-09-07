@@ -9,6 +9,7 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <sstream>
 #include <string>
 
@@ -29,9 +30,9 @@ void put_file(const std::filesystem::path& path, std::string_view contents) {
     stream << contents;
 }
 
-/// Synthetic steps. The built-in chain is empty because v1 is the first schema, so
-/// the machinery is exercised against these instead -- which also means a real
-/// `migrate_1_to_2` will land on already-tested infrastructure.
+/// Synthetic steps. The built-in chain has one real link and cannot exercise ordering,
+/// gap detection or multi-step chaining on its own, so the machinery is tested against
+/// these -- which is what let `migrate_1_to_2` land on already-proven infrastructure.
 MigrationStep renaming_step(int from, int to, std::string_view name) {
     return MigrationStep{from, to, name, "renames video.old_key to video.new_key", [](toml::table& document) {
                              auto* video = document.get_as<toml::table>("video");
@@ -62,15 +63,52 @@ MigrationStep failing_step(int from, int to) {
 // The built-in chain
 // ---------------------------------------------------------------------------
 
-TEST(MigrationChain, BuiltInChainIsEmptyBecauseV1IsTheFirstSchema) {
-    // Not a placeholder assertion: an identity step that merely bumped the version
-    // would mask a genuinely missing transformation when v2 arrives.
-    EXPECT_TRUE(fc::config::builtin_migrations().empty());
-    EXPECT_EQ(fc::config::kCurrentSchemaVersion, 1);
+// The chain must reach the current version from every version that has ever shipped.
+// Asserted as a property rather than as a list, so adding a v3 without its step fails
+// here rather than at a user's first launch on the new build.
+TEST(MigrationChain, BuiltInChainReachesTheCurrentVersionFromEveryEarlierOne) {
+    const std::span<const MigrationStep> steps = fc::config::builtin_migrations();
+    ASSERT_EQ(steps.size(), static_cast<std::size_t>(fc::config::kCurrentSchemaVersion - 1))
+        << "one step per version transition, and no more";
+
+    for (int from = 1; from < fc::config::kCurrentSchemaVersion; ++from) {
+        toml::table document;
+        document.insert_or_assign("schema_version", from);
+        const auto outcome = fc::config::run_migrations(document, from, fc::config::kCurrentSchemaVersion, steps);
+        ASSERT_TRUE(outcome.has_value()) << "no path from v" << from;
+        EXPECT_EQ(outcome.value().to_version, fc::config::kCurrentSchemaVersion);
+    }
 }
 
-TEST(MigrationChain, AVersion1FileNeedsNoMigration) {
+TEST(MigrationChain, AVersion1FileMigratesToTheCurrentSchema) {
     auto result = fc::config::load_from_string("schema_version = 1\n[video]\nfps = 30\n");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result.value().migrated);
+    // The setting the file *did* carry is untouched by the migration. `migrate_1_to_2`
+    // adds sections; a step that also rewrote an existing value would be doing two jobs.
+    EXPECT_EQ(result.value().config.video.fps, 30);
+    EXPECT_EQ(result.value().config.schema_version, fc::config::kCurrentSchemaVersion);
+}
+
+// The point of `migrate_1_to_2` being a no-op: a v1 file and a v2 file that both omit
+// the new sections must produce identical settings. If they did not, the step would be
+// hiding a transformation that ought to be explicit.
+TEST(MigrationChain, MigratedDefaultsMatchAFreshFilesDefaults) {
+    const auto migrated = fc::config::load_from_string("schema_version = 1\n");
+    const auto fresh = fc::config::load_from_string("schema_version = 2\n");
+    ASSERT_TRUE(migrated.has_value());
+    ASSERT_TRUE(fresh.has_value());
+
+    EXPECT_EQ(migrated.value().config.hotkeys.start, fresh.value().config.hotkeys.start);
+    EXPECT_EQ(migrated.value().config.hotkeys.stop, fresh.value().config.hotkeys.stop);
+    EXPECT_EQ(migrated.value().config.hotkeys.pause_resume, fresh.value().config.hotkeys.pause_resume);
+    EXPECT_EQ(migrated.value().config.overlay.pill_enabled, fresh.value().config.overlay.pill_enabled);
+    EXPECT_EQ(migrated.value().config.overlay.pill_corner, fresh.value().config.overlay.pill_corner);
+    EXPECT_EQ(migrated.value().config.overlay.toast_max_visible, fresh.value().config.overlay.toast_max_visible);
+}
+
+TEST(MigrationChain, AVersion2FileNeedsNoMigration) {
+    auto result = fc::config::load_from_string("schema_version = 2\n[video]\nfps = 30\n");
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result.value().migrated);
     EXPECT_TRUE(result.value().backup_path.empty());
@@ -277,7 +315,15 @@ TEST(MigrationBackup, AnOutOfRangeVersionIsClampedRatherThanTreatedAsAMigration)
     const auto result = fc::config::load(config);
     ASSERT_TRUE(result.has_value()) << "a corrupt version must not make the file unloadable";
     EXPECT_EQ(result.value().config.video.fps, 30) << "the rest of the file is still usable";
-    EXPECT_FALSE(result.value().migrated);
+    // Clamped to the schema floor and then treated as a *v1 file*, which is what the
+    // chain does with any v1 file: it migrates it. The thing being ruled out is the
+    // chain going looking for a `migrate_-9999_to_-9998` and refusing the load over a
+    // step for a schema that never existed.
+    //
+    // This assertion used to read `EXPECT_FALSE(migrated)`, which held only while 1 was
+    // both the clamp floor and the current version. That coincidence ended at v2, and
+    // the assertion was testing it rather than the behaviour named in the test's title.
+    EXPECT_EQ(result.value().config.schema_version, fc::config::kCurrentSchemaVersion);
     EXPECT_TRUE(std::filesystem::exists(config)) << "the original must never be deleted";
     EXPECT_EQ(read_file(config), original) << "load must not rewrite the file";
 }

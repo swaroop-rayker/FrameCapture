@@ -31,14 +31,16 @@ struct MigrationStep {
 
 /// The built-in chain, ordered by `from_version`.
 ///
-/// **Currently empty, and correctly so:** v1 is the first schema, so there is no
-/// earlier shape to migrate from. Writing a `migrate_1_to_2` now would mean
-/// inventing a v2 that does not exist.
+/// One step so far: `migrate_1_to_2` (M9.6), which adds `[hotkeys]` and `[overlay]`.
+/// It transforms nothing -- both sections are default-only, and `validate` already
+/// supplies a default for an absent key -- so what it contributes is the version stamp
+/// and, through `run_migrations`, SPEC.md §17's backup before the file is rewritten.
+/// See its comment for why an empty-bodied step is still the right shape.
 ///
-/// When v2 arrives, append a step here and bump `kCurrentSchemaVersion`. The
-/// machinery below -- ordering, gap detection, backup, per-step logging -- is
-/// implemented and tested against synthetic steps in `test_config_migration`, so a
-/// real step only has to supply its own transformation.
+/// When v3 arrives, append a step here and bump `kCurrentSchemaVersion`. The machinery
+/// below -- ordering, gap detection, backup, per-step logging -- is implemented and
+/// tested against synthetic steps in `test_config_migration`, so a real step only has to
+/// supply its own transformation.
 [[nodiscard]] std::span<const MigrationStep> builtin_migrations();
 
 struct MigrationRecord {

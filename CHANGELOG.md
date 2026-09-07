@@ -9,6 +9,162 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Groundwork for the on-screen recording controls (M9.6 Phase 0).** Nothing user-visible
+  yet — this is the plumbing the floating pill, the toast notifications and the custom
+  hotkeys are built on, landed and verified first because one part of it could have
+  changed the design of the rest.
+
+  - **Stopping a recording no longer freezes the window.** Pressing stop used to lock the
+    interface for as long as saving took — measured at about four seconds for a 1.2 GB
+    recording — during which nothing repainted and the global hotkeys stopped responding.
+    The interface now stays live while the file is written.
+  - **Saving reports its progress.** The engine now says which stage of saving it is in
+    and how far through it is, so the forthcoming progress bar has something real to show
+    rather than an animation. Matroska recordings have no remux stage and go straight to
+    the final check, which is the container being faster and not a bar that stalled.
+  - **Two new settings sections**, `[hotkeys]` and `[overlay]`, with the placement and key
+    bindings the next phases will use. Existing configuration files are migrated
+    automatically and backed up first; nothing you have set changes.
+
+  The part that had to be answered before anything else could be designed: **an overlay
+  can be kept out of the recorded video entirely**, on both capture paths, with no black
+  rectangle left behind where it was. That is now proven on the reference machine rather
+  than assumed, and the wrong way of doing it — which produces exactly that black
+  rectangle — is blocked by a lint rule and pinned by a test.
+
+- **A floating control while you record (M9.6 Phase 1).** A small bar appears when
+  recording starts, and stays on top of whatever you are recording — including a
+  fullscreen game, where FrameCapture's own window is buried and unreachable.
+
+  It shows how long the recording is, how large the file has become, and gives you pause
+  and stop without switching away. Drag it anywhere; it remembers where you put it, snaps
+  to screen edges, and comes back on screen by itself if you unplug the monitor it was on.
+
+  Things worth knowing, because they are deliberate:
+
+  - **It is not in your recording.** Not the bar, and not a black rectangle where the bar
+    was. If a machine turns out not to support hiding it, the bar simply does not appear
+    and FrameCapture says so — showing it anyway is never the fallback.
+  - **Clicking it will not minimize your game.** Clicking a normal window over a
+    fullscreen game minimizes the game; this one cannot be activated, so it does not.
+  - **Pressing stop shows you the save happening.** A long recording takes a few seconds
+    to write, and you now get a progress bar for it instead of a frozen window. The bar
+    closes itself once the file is written *and* checked — and if the check fails, it
+    stays up and says so rather than quietly disappearing.
+  - **Paused looks different, not just differently coloured.** The indicator changes shape
+    as well as colour, so it does not depend on telling amber from red.
+
+  Sizes now read as `2.50 GB` rather than `2560.0 MB`, in the main window as well.
+
+- **Notifications (M9.6 Phase 2).** Short messages appear in the top-right corner and fade
+  away on their own: the recording paused or resumed, a file saved, a warning from the
+  recorder, an error that needs your attention.
+
+  Like the floating controls, **they are not in your recording** — and if a machine turns
+  out not to support hiding them, they do not appear at all and the messages stay in the
+  status bar instead.
+
+  - **Errors stay until you dismiss them**, and everything else clears itself. A message
+    that disappears before it is read is a message that did not happen — and the one you
+    must not miss is the one about a recording you cannot make again. Click anywhere on a
+    message to dismiss it; hovering pauses its countdown while you read.
+  - **Repeats are counted, not stacked.** Some faults report themselves several times in
+    a second; you get one message with a small counter rather than four copies of the
+    same sentence.
+  - **A burst cannot bury the screen.** At most four are shown at once and the rest wait
+    their turn, with a hard limit on how many are held.
+  - **The kind of message is legible without reading it** — a coloured stripe down the
+    edge, differing in shape as well as colour so it does not depend on telling amber
+    from red.
+
+  Position, how long they stay, and how many show at once are all in Settings.
+
+- **Custom keyboard shortcuts (M9.6 Phase 3).** Settings → Hotkeys now has three
+  shortcuts you can rebind: start recording, stop recording, and pause/resume. Click a
+  field, press the combination you want, and it is recorded.
+
+  - **Start and stop share one key by default**, which is the toggle FrameCapture has
+    always had — press it to start, press it again to stop. Give them different keys if
+    you would rather. When two actions share a combination the dialog says so.
+  - **A shortcut that cannot be used says why, and keeps saying it.** If another
+    application already owns the combination, or Windows reserves it, the reason sits
+    next to that shortcut for as long as it is true. Previously this appeared once in
+    the status bar and was gone before you next reached for the key.
+  - **Far more keys work.** Only the function keys, letters and digits could be bound
+    before; `Home`, `End`, `Insert`, `Delete`, `Page Up`/`Down`, the arrows, the numpad,
+    punctuation and `Pause` were all silently refused. They work now.
+  - **Every key works, not just some of them.** Letters, digits, the numpad and
+    punctuation all record properly.
+  - Every combination still needs at least one modifier — a bare key would be swallowed
+    system-wide, in every application.
+  - Changes take effect immediately; no restart.
+
+  A shortcut you press now also raises a notification confirming what happened, which
+  matters when you pressed it from a fullscreen game and cannot see the window.
+
+- **The Edit, View and Tools menus do things (M9.6 Phase 4).** All three used to open
+  empty. Every item in them now works; nothing is greyed out standing in for something
+  unfinished.
+
+  **Edit** — Settings (`Ctrl+,`), copy the path of your last recording, and **copy a
+  diagnostics summary**: versions, your graphics adapters and which one drives the
+  display, the encoder and container in use, and the last error. It is the thing to paste
+  into a bug report, and it works with the recorder stopped, which is when you most often
+  want it.
+
+  **View** — show or hide the preview, the floating controls, the notifications, and each
+  of the four panels; keep the window above other windows; reset the layout. **What you
+  choose is remembered** for next time. Resetting the layout deliberately leaves your
+  notification settings alone.
+
+  **Tools** —
+
+  - **Open output folder** and **Open logs folder**, which now open the folder rather than
+    telling you where it is. The Logs button beside the controls does the same.
+  - **Export diagnostic bundle** — a single zip of the logs, your settings file, the most
+    recent crash report, and the diagnostics summary. You choose where it goes. Nothing is
+    sent anywhere; FrameCapture has no network access of any kind, by design.
+  - **GPU topology** — which graphics adapters FrameCapture can see, and which one owns
+    your display. On a laptop with two graphics chips this is the single fact that
+    explains a recording that came out black.
+  - **Log level** — turn detailed logging up while you reproduce a problem, without
+    restarting or editing a file. It applies to the running recorder only and says so;
+    Settings → Advanced is where it sticks.
+  - **Engine → Recover unfinished recordings** — if FrameCapture or your machine stopped
+    partway through a recording, the file is left playable but unfinished, and this
+    repairs and verifies it. It lists what it found before touching anything, works
+    through them one at a time, and names anything it could not repair rather than
+    quietly leaving it out.
+
+  Restarting the engine has moved from File to Tools → Engine, alongside recovery. Help →
+  About now shows the recorder's version as well as the interface's.
+
+- **Four new entries in the project's failure-mode matrix (M9.6 Phase 6).** The
+  specification carries a table of every way this recorder is known to be able to fail,
+  each with a named automated test, and shipping requires every row green. This release
+  adds four: the on-screen controls appearing in your recording; a control that stops
+  responding while a file is saving; a keyboard shortcut that does nothing; and a save
+  that never finishes or a control that vanishes before the file is written.
+
+  All four are green, and the numbers behind them are recorded rather than described.
+  The floating control repaints **9.8 times a second** while saving, each repaint costing
+  **0.12 ms**; a click on it is acknowledged in **0.12 ms**, well inside a single frame.
+
+- **Continuous integration (M9.6 Phase 5).** Nothing you can see in the application, and
+  the reason it is here is that it changes what "released" will mean: from now on every
+  change is built and tested automatically before it can land, rather than on whoever
+  remembered to run the suite.
+
+  Three pipelines. One builds and runs the hardware-free tests on every proposed change.
+  One runs the full suite — the parts needing a real graphics card, a real display and a
+  real sound device — nightly on the machine that has them. One runs the long-duration
+  tests weekly.
+
+  The split is not tidiness. A rented build machine has no real graphics card, so the
+  hardware tests would not *fail* there — they would pass, having tested nothing, and
+  every guarantee resting on them would be worthless. That rule is now checked
+  automatically too, so it cannot be broken by a well-meaning edit.
+
 - **Per-application audio tracks (SPEC.md §8.6, "Tier B").** A recording can now carry a
   separate audio track for each of up to five applications, alongside the full system mix.
   Set it up under Settings → Audio: tick "Per-application multi-track" and name the
@@ -123,6 +279,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   part was slow.
 
 ### Fixed
+
+- **The menu bar could have started opening empty menus (BUG-054).** Found while testing
+  Phase 4's new menus, and latent since the menu bar was first written: the menus had no
+  owner, and anything that asked the window what was in one destroyed it. The application
+  never asked, so it never happened in use — but a menu destroyed this way leaves its
+  title on the bar and opens with nothing in it, which is exactly the problem Phase 4
+  existed to fix. The window now owns its menus outright.
 
 - **An unattended recording no longer restarts its own capture every few seconds
   (BUG-045).** On a screen that was not changing — which is most of what an unattended

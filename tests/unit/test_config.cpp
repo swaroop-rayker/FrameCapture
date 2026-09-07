@@ -344,6 +344,88 @@ TEST(ConfigSerialisation, AlwaysStampsTheCurrentSchemaVersion) {
 }
 
 // ---------------------------------------------------------------------------
+// [hotkeys] and [overlay] -- schema v2 (M9.6)
+//
+// The engine stores both and acts on neither, which is exactly why they need a test
+// here: nothing else in the engine would notice if a key stopped round-tripping, and
+// the symptom in the GUI would be "my hotkey reset itself" long after the change.
+// ---------------------------------------------------------------------------
+
+TEST(ConfigOverlayAndHotkeys, DefaultsAreWhatCONFIGmdDocuments) {
+    const Config config = fc::config::defaults();
+
+    EXPECT_TRUE(config.hotkeys.enabled);
+    EXPECT_EQ(config.hotkeys.start, "Ctrl+Shift+F9");
+    // Deliberately the same sequence as `start`: one binding, dispatched as a toggle.
+    EXPECT_EQ(config.hotkeys.stop, config.hotkeys.start);
+    EXPECT_EQ(config.hotkeys.pause_resume, "Ctrl+Shift+F10");
+
+    EXPECT_TRUE(config.overlay.pill_enabled);
+    EXPECT_EQ(config.overlay.pill_corner, fc::config::OverlayCorner::BottomRight);
+    EXPECT_EQ(config.overlay.toast_corner, fc::config::OverlayCorner::TopRight);
+    // -1, not 0: "never placed" has to be distinguishable from "placed at the origin".
+    EXPECT_EQ(config.overlay.pill_x, -1);
+    EXPECT_EQ(config.overlay.pill_y, -1);
+    EXPECT_EQ(config.overlay.toast_duration_s, 4);
+    EXPECT_EQ(config.overlay.toast_max_visible, 4);
+}
+
+TEST(ConfigOverlayAndHotkeys, NonDefaultValuesRoundTrip) {
+    Config config = fc::config::defaults();
+    config.hotkeys.enabled = false;
+    config.hotkeys.start = "Ctrl+Alt+R";
+    config.hotkeys.stop = "Ctrl+Alt+S";
+    config.hotkeys.pause_resume = "Ctrl+Alt+Home";
+    config.overlay.pill_enabled = false;
+    config.overlay.pill_corner = fc::config::OverlayCorner::TopLeft;
+    config.overlay.pill_monitor = R"(\\.\DISPLAY2)";
+    config.overlay.pill_x = -1920;
+    config.overlay.pill_y = 40;
+    config.overlay.toasts_enabled = false;
+    config.overlay.toast_corner = fc::config::OverlayCorner::BottomLeft;
+    config.overlay.toast_duration_s = 9;
+    config.overlay.toast_max_visible = 2;
+
+    const LoadOutcome reloaded = must_load(fc::config::serialize(config));
+
+    EXPECT_FALSE(reloaded.config.hotkeys.enabled);
+    EXPECT_EQ(reloaded.config.hotkeys.start, "Ctrl+Alt+R");
+    EXPECT_EQ(reloaded.config.hotkeys.stop, "Ctrl+Alt+S");
+    EXPECT_EQ(reloaded.config.hotkeys.pause_resume, "Ctrl+Alt+Home");
+    EXPECT_FALSE(reloaded.config.overlay.pill_enabled);
+    EXPECT_EQ(reloaded.config.overlay.pill_corner, fc::config::OverlayCorner::TopLeft);
+    EXPECT_EQ(reloaded.config.overlay.pill_monitor, R"(\\.\DISPLAY2)");
+    // A negative x is a real position on a monitor left of the primary one, not an
+    // error to be clamped away.
+    EXPECT_EQ(reloaded.config.overlay.pill_x, -1920);
+    EXPECT_EQ(reloaded.config.overlay.pill_y, 40);
+    EXPECT_FALSE(reloaded.config.overlay.toasts_enabled);
+    EXPECT_EQ(reloaded.config.overlay.toast_corner, fc::config::OverlayCorner::BottomLeft);
+    EXPECT_EQ(reloaded.config.overlay.toast_duration_s, 9);
+    EXPECT_EQ(reloaded.config.overlay.toast_max_visible, 2);
+}
+
+// An unparseable sequence is the GUI's problem to report, not the loader's to reject.
+// The engine cannot tell a well-formed binding from a bindable one -- only
+// `RegisterHotKey` can -- so refusing here would be guessing.
+TEST(ConfigOverlayAndHotkeys, AnUnbindableSequenceLoadsVerbatim) {
+    const LoadOutcome outcome = must_load("schema_version = 2\n[hotkeys]\nstart = \"Ctrl+Shift+Nonsense\"\n");
+    EXPECT_EQ(outcome.config.hotkeys.start, "Ctrl+Shift+Nonsense");
+}
+
+TEST(ConfigOverlayAndHotkeys, AnUnknownCornerFallsBackRatherThanPickingTheFirstEnumerator) {
+    const LoadOutcome outcome = must_load("schema_version = 2\n[overlay]\npill_corner = \"middle\"\n");
+    EXPECT_EQ(outcome.config.overlay.pill_corner, fc::config::defaults().overlay.pill_corner);
+    EXPECT_TRUE(has_warning(outcome.warnings, WarningKind::UnknownValue, "overlay.pill_corner"));
+}
+
+TEST(ConfigOverlayAndHotkeys, ToastCountIsClampedToTheSchemaRange) {
+    const LoadOutcome outcome = must_load("schema_version = 2\n[overlay]\ntoast_max_visible = 99\n");
+    EXPECT_EQ(outcome.config.overlay.toast_max_visible, 8);
+    EXPECT_TRUE(has_warning(outcome.warnings, WarningKind::Clamped, "overlay.toast_max_visible"));
+}
+
+// ---------------------------------------------------------------------------
 // Disk round trip
 // ---------------------------------------------------------------------------
 
@@ -471,6 +553,55 @@ TEST(ConfigSchema, AnExtensionWeDoNotWriteNamesNoContainer) {
         EXPECT_FALSE(fc::config::container_from_extension(ext).has_value())
             << ext << " was accepted as a container we write";
     }
+}
+
+// ---------------------------------------------------------------------------
+// [window] -- schema v2, added by M9.6 Phase 4's View menu
+//
+// Stored-not-acted-on for the third time, and it needs a test here for the same reason
+// [hotkeys] and [overlay] do: nothing in the engine reads these, so a key that stopped
+// round-tripping would surface as "my panels come back every launch" and nowhere else.
+// ---------------------------------------------------------------------------
+
+TEST(ConfigWindow, EveryPanelIsShownByDefaultAndTheWindowIsNotPinned) {
+    const Config config = fc::config::defaults();
+
+    // SPEC.md 16.2 draws the whole window; a panel is absent only because a user hid it.
+    EXPECT_TRUE(config.window.show_preview);
+    EXPECT_TRUE(config.window.show_sources);
+    EXPECT_TRUE(config.window.show_audio_mixer);
+    EXPECT_TRUE(config.window.show_controls);
+    EXPECT_TRUE(config.window.show_status);
+    // The exception, and it defaults off: staying above every other application on the
+    // machine is not a default anybody asked for.
+    EXPECT_FALSE(config.window.always_on_top);
+}
+
+TEST(ConfigWindow, ALayoutRoundTrips) {
+    Config config = fc::config::defaults();
+    config.window.show_preview = false;
+    config.window.show_sources = false;
+    config.window.show_audio_mixer = true;
+    config.window.show_controls = false;
+    config.window.show_status = true;
+    config.window.always_on_top = true;
+
+    const LoadOutcome reloaded = must_load(fc::config::serialize(config));
+
+    EXPECT_FALSE(reloaded.config.window.show_preview);
+    EXPECT_FALSE(reloaded.config.window.show_sources);
+    EXPECT_TRUE(reloaded.config.window.show_audio_mixer);
+    EXPECT_FALSE(reloaded.config.window.show_controls);
+    EXPECT_TRUE(reloaded.config.window.show_status);
+    EXPECT_TRUE(reloaded.config.window.always_on_top);
+}
+
+// Every config file written before this milestone has no [window] section at all.
+TEST(ConfigWindow, AFileWithNoWindowSectionLoadsTheLayoutTheSpecDraws) {
+    const LoadOutcome outcome = must_load("schema_version = 1\n[video]\nfps = 60\n");
+    EXPECT_TRUE(outcome.config.window.show_status);
+    EXPECT_TRUE(outcome.config.window.show_preview);
+    EXPECT_FALSE(outcome.config.window.always_on_top);
 }
 
 } // namespace

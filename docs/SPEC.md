@@ -541,7 +541,7 @@ rediscovered:
 - **Commands:** `hello`, `get_sources`, `get_devices`, `get_gpu_topology`, `configure`, `start_preview`, `stop_preview`, `start_record`, `stop_record`, `pause_record`, `resume_record`, `get_stats`, `get_health`, `set_log_level`, `recover`, `shutdown`.
 - `pause_record` / `resume_record` semantics are **§7.5**, not obvious from the names: paused wall-clock time is excised from the file, and both are idempotent (pausing a paused recording succeeds). `get_stats` reports `paused_total_ms` alongside the timeline elapsed.
 - **Events (engine → GUI, unsolicited):** `state_changed`, `stats` (2 Hz), `warning`, `error`, `gpu_migrated`, `audio_device_migrated`, `degradation_changed`, `segment_rolled`, `recording_finalized`. Paused is a `state_changed` value, not an event of its own — the GUI must render it as a distinct state (§16.5), because a paused recording that looks like a running one loses footage silently.
-- Every command carries an `id`; every response echoes it. Requests time out at 5 s (except `stop_record`, 30 s, since finalization is legitimately slow).
+- Every command carries an `id`; every response echoes it. Requests time out at 5 s, except **`stop_record` and `recover`, which get 30 s** since finalization is legitimately slow. *(Amended M9.6: `recover` was omitted originally because nothing called it. It runs the same lossless remux `stop_record` performs — BUG-046 measured ~3.3 s of remux plus ~1 s of validate for a 1.2 GB file — so a 5 s budget would time out on every recording large enough to be worth recovering.)*
 
 ### 15.2 Preview channel
 - Named **shared memory** (`CreateFileMapping`) triple-buffered ring, one `HANDLE`-passed section, with an atomic write-index header.
@@ -581,6 +581,38 @@ The pause control (`❚❚`) is enabled only while recording. While paused the s
 reads `❚❚ PAUSED 00:14:22` — the **timeline** elapsed, i.e. the length the file will
 have — with `Paused: 00:02:07` beneath it (§7.5, §16.5).
 
+**Two surfaces outside this window — added M9.6.** Both are separate top-level windows, not
+children of it, because the whole point is that they stay on screen while this window is
+buried behind a fullscreen game.
+
+```
+┌──────────────────────────────┐        ┌────────────────────────────┐
+│ ● 00:14:22   1.42 GB  ❚❚  ■ │        │ ⚠ A keyboard shortcut is   │
+└──────────────────────────────┘        │   unavailable              │
+     the recording pill (F1)            └────────────────────────────┘
+                                              a toast (F2)
+```
+
+- **The recording pill** — elapsed timeline, file size, pause/resume and stop, and the save
+  progress bar while `stop_record` runs. Draggable, edge-snapping, and clamped back on screen
+  if the monitor it was on disappears. Default on.
+- **Toasts** — top-right by default, stacked, for state changes, warnings and errors. Errors
+  stay until dismissed; everything else expires.
+
+**Neither may ever appear in the recording, and neither may leave a black rectangle where it
+was.** Every overlay HWND carries `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`,
+re-applied when Qt recreates the handle, and extended to any popup an overlay opens. The
+older `WDA_MONITOR` hides a window by painting **black** into the capture, which is the
+black-cutout defect and is one hex digit away; it is a banned pattern in `scripts/lint.ps1`.
+Where the affinity is refused, the overlay **does not appear at all** and the window says so —
+showing it anyway is never the fallback (§20 row 19).
+
+**The menu bar is `File · Edit · View · Tools · Help`, and every item in it does something.**
+Edit, View and Tools opened empty until M9.6. View's panel-visibility toggles and `always on
+top` persist through `[window]` in §17's file; Tools carries the diagnostic bundle (§18), the
+GPU topology (§5.1), the log level (§15.1's `set_log_level`, for the running engine only) and
+the recovery path (§10.4's `recover`).
+
 ### 16.3 Theme
 Dark, modern, low-eye-strain. **No pure black, no pure white** — pure `#000000` backgrounds cause halation on OLED and pure white text at high contrast is fatiguing over long sessions.
 
@@ -615,8 +647,33 @@ Dark, modern, low-eye-strain. **No pure black, no pure white** — pure `#000000
 
 Plus a **reconnect** checkbox for §8.6's re-attach policy, default on.
 
+**The `Hotkeys` section — added M9.6.** §16.5 requires rebindable global hotkeys and this
+section named none, so there was nowhere to rebind them. Three bindings — **start**, **stop**
+and **pause/resume** — each a capture field that records the next combination pressed.
+
+- **Three bindings, not two.** `start` and `stop` share `Ctrl+Shift+F9` by default, which is
+  the toggle this project shipped with; separating them is a matter of giving one a different
+  key. A shared sequence dispatches by predicate — the binding whose precondition holds now
+  is the one that runs — so one key starting and stopping a recording is a consequence of the
+  defaults rather than a special case in the code.
+- **Every combination needs at least one modifier.** A bare key registered with
+  `RegisterHotKey` is swallowed system-wide, in every application.
+- **A refused binding says why, and keeps saying it.** Windows reserves some combinations and
+  another application may already own one; the reason sits beside that binding for as long as
+  it is true, rather than appearing once in the status bar and being gone before the user next
+  reaches for the key (§20 row 21).
+- **A refused rebind leaves its action unbound** rather than silently keeping the old key,
+  which would claim an accelerator that no longer runs it. New registrations are taken before
+  old ones are released, so a successful rebind never passes through a window where neither
+  key works.
+- Changes apply immediately; no restart.
+
+**The `Advanced` section's `log level` is the durable setting.** Tools ▸ Log level changes the
+running engine and persists nothing (§15.1's `set_log_level`), which is the knob for
+reproducing a defect in the next thirty seconds. This is the one that survives a restart.
+
 ### 16.5 Accessibility & UX invariants
-- Global hotkeys for start/stop/pause, rebindable, registered via `RegisterHotKey`, with conflict detection.
+- Global hotkeys for start/stop/pause, rebindable, registered via `RegisterHotKey`, with conflict detection. **Rebound in Settings ▸ Hotkeys (§16.4); a conflict is reported per binding and persists while it is true (§20 row 21).** Every hotkey press also raises a toast, because a shortcut pressed from a fullscreen game is otherwise confirmed only by the pill appearing.
 - **Paused is a first-class state, not a variant of recording (§7.5).** The status panel shows `❚❚ PAUSED` with the *timeline* elapsed — the length the file will actually have — and reports total paused time separately. The recording dot stops pulsing and holds. A paused recording that looks like a running one is how a user loses ten minutes of footage without noticing.
 - Every destructive or surprising action (enabling segmentation, changing output directory mid-session) requires explicit confirmation.
 - The status panel never lies. If frames are being dropped, it says so in `--warn` colour with the exact count and percentage.
@@ -679,6 +736,10 @@ Each row must have a named, automated test. A row without a green test is an inc
 | 16 | **Multi-track silently enabled on MP4 → tracks invisible in most players** | Soft warning instead of a hard block | `FcError::MULTITRACK_REQUIRES_MKV` (3021), enforced engine-side, not just in the GUI | `test_multitrack_mp4_rejected` |
 | 17 | **Wrong channel layout (5.1 plays as stereo / channels swapped)** | Layout signalled in the codec context but not in `AudioSpecificConfig` or the container | §8.5 — all three signalling sites asserted | `test_channel_layout`: encode 5.1 and 7.1, ffprobe assert layout in stream *and* container; per-channel tone identification |
 | 18 | **Pause/resume desyncs audio, freezes video, or shortens the file** | Paused wall-clock time excised from one stream's timeline but not the other's; the silence generator filling the paused span; duplicates emitted across the pause | §7.5 — one shared `paused_total_ns` alongside `t0`, consulted by the pacer and the audio timeline both; silence generator suspended; forced IDR on resume | `test_pause_resume`: record with a 1 kHz beep and a flash on frame boundaries, pause 3×, assert the decoded file contains exactly the unpaused frame count, `\|A/V offset\| < 20 ms` at every mark **after** each resume, no duplicate run at a pause seam, and one continuous file |
+| 19 | **The on-screen overlay appears in the recording, or a black rectangle appears where it was** | `WDA_MONITOR` used instead of `WDA_EXCLUDEFROMCAPTURE` — one hex digit apart, and the older constant hides a window by painting black into the capture; display affinity lost when Qt recreates the HWND; popups and tooltips an overlay opens left unstamped | §16.2 — one exclusion primitive, applied to every overlay HWND, re-applied on `WinIdChange`, and extended to transient children. Where the affinity is refused the overlay does not appear at all | `test_overlay_exclusion` (gpu, both backends) + `test_overlay_exclusion.py` (pytest) |
+| 20 | **An overlay control is unresponsive, or clicking it minimizes a fullscreen game** | The GUI thread blocked inside a synchronous IPC request for the whole of a 30 s finalization, so nothing repaints and `WM_HOTKEY` is never pumped; the overlay window takes activation when clicked | §15.1 — `stop_record` issued asynchronously on a bounded command queue, so the event loop stays alive; `WS_EX_NOACTIVATE` + `Qt.WindowDoesNotAcceptFocus` so the overlay never takes focus | `test_overlay_responsiveness` (pytest) + `test_async_commands` (pytest, engine-backed) |
+| 21 | **A bound hotkey does nothing** | Conflict reported once in the status bar and lost; the GUI thread blocked so `WM_HOTKEY` is never pumped; the key absent from the virtual-key table, so the binding was never registered | §16.4 — per-binding conflict state that persists while it is true; the async command path of row 20; a virtual-key table covering the keys a user reaches for | `test_hotkeys` (pytest) |
+| 22 | **Save progress never completes, or the floating control disappears before the file is written** | The progress bar driven from an event loop that is blocked; the control closed on the stop command returning, or on a timer, rather than on the engine confirming the file validated | §10.4 — `finalize_progress` events drive the bar, and the control closes only on `recording_finalized` **with `valid: true`**. A file that failed validation leaves it on screen saying so | `test_finalize_progress` (cpu) + `test_async_commands` (pytest, engine-backed) |
 
 ### 20.1 Additional test tiers
 - **Unit (GoogleTest):** every pure function — clock math, PTS quantization, drift calculation, config migration, segment naming, error mapping. Target **> 85% line coverage on non-UI C++**.
@@ -845,7 +906,7 @@ FrameCapture/
 
 FrameCapture v1.0 ships only when **all** of the following hold on the reference rig:
 
-- [ ] Every row in §20 (all 18) has a green automated test.
+- [ ] Every row in §20 (all 22) has a green automated test.
 - [ ] Audio Tier A green with stereo, 5.1, and 7.1 endpoints; layout correct in stream *and* container.
 - [ ] Audio Tier B green on MKV with 6 tracks; hard-rejected on MP4 with error 3021; Tier A byte-identical whether Tier B is on or off.
 - [ ] `test_amf_zero_copy` green — no host round-trip on the AMF encode path.

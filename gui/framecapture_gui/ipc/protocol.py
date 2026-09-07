@@ -64,6 +64,12 @@ class Event(StrEnum):
     SEGMENT_ROLLED = "segment_rolled"
     RECORDING_FINALIZED = "recording_finalized"
 
+    # Beyond SPEC.md §15.1's nine; added by M9.6 so the GUI can show what
+    # `stop_record` is doing during the seconds it takes. Additive under §15.1's
+    # compatibility rule -- an engine that does not send it costs the progress bar its
+    # detail, not its correctness, because `recording_finalized` still ends the wait.
+    FINALIZE_PROGRESS = "finalize_progress"
+
     @classmethod
     def from_wire(cls, name: str) -> Event | None:
         """Parse an event name, or ``None`` if this build has never heard of it.
@@ -117,9 +123,23 @@ class RecordingState(StrEnum):
 DEFAULT_TIMEOUT_S = 5.0
 STOP_RECORD_TIMEOUT_S = 30.0
 
+#: `recover` gets `stop_record`'s budget, and §15.1's sentence has to be read to mean it.
+#:
+#: The command runs `mux::recover`, which for MP4 is *the same lossless remux a clean
+#: stop performs* -- BUG-046 measured that at ~3.3 s of remux plus ~1 s of validate for a
+#: 1.2 GB recording. §15.1 names only `stop_record` because `recover` had no caller when
+#: it was written; leaving it at 5 s would mean the recovery path times out on every
+#: recording large enough to be worth recovering, which is all of them.
+#:
+#: Flagged rather than assumed: §15.1's wording needs the owner's pen (M9.6 Phase 6).
+RECOVER_TIMEOUT_S = 30.0
+
+#: The commands whose work is bounded by the disk rather than by a lock.
+_SLOW_COMMANDS = {Command.STOP_RECORD: STOP_RECORD_TIMEOUT_S, Command.RECOVER: RECOVER_TIMEOUT_S}
+
 
 def timeout_for(command: Command) -> float:
-    return STOP_RECORD_TIMEOUT_S if command is Command.STOP_RECORD else DEFAULT_TIMEOUT_S
+    return _SLOW_COMMANDS.get(command, DEFAULT_TIMEOUT_S)
 
 
 def pipe_path_for(session_id: str) -> str:

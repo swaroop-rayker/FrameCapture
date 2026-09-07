@@ -155,6 +155,16 @@ struct SessionSettings {
     std::int64_t injected_stall_ns = 0;
     int injected_stall_period = 20;
 
+    /// SPEC.md §10.4's finalization stages, reported while `stop()` runs (M9.6 §2.1).
+    /// Carried, not interpreted -- like `segmentation` above. Null when nobody is
+    /// listening, which is every test that does not assert on it.
+    ///
+    /// A migration rebuilds the pipeline, so this is set on every pipeline the session
+    /// creates rather than only the first. Otherwise a recording that survived a GPU
+    /// change would stop reporting progress at exactly the point the user most wants to
+    /// know the file is being saved.
+    mux::FinalizeProgressFn on_finalize_progress;
+
     /// Builds the capture backend. Empty selects `capture::create_capture`, which is
     /// what production does and what every real recording uses.
     ///

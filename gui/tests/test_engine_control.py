@@ -132,6 +132,15 @@ def test_the_gui_starts_the_engine_and_completes_the_handshake(controller: Engin
     assert not controller.supports("streaming"), "SPEC.md §0.2 forbids it"
     assert not controller.supports("webcam"), "SPEC.md §0.2 forbids it"
 
+    # M9.6 Phase 4: the handshake now carries the engine binary's own version, which is
+    # what Help ▸ About and the diagnostics summary report. Asserted against the real
+    # engine because the whole value of the field is that it comes from the binary
+    # rather than from a constant on this side -- the GUI's `__version__` and the
+    # engine's CMake version are two numbers that already disagree.
+    assert controller.engine_version, "the engine did not report its version"
+    assert controller.engine_version[0].isdigit(), f"not a version: {controller.engine_version!r}"
+    assert controller.protocol.startswith("1."), f"protocol {controller.protocol!r}"
+
 
 def test_a_recording_runs_pauses_resumes_and_finalizes_entirely_from_the_gui(
     controller: EngineController, output_path: Path
@@ -187,7 +196,10 @@ def test_a_recording_runs_pauses_resumes_and_finalizes_entirely_from_the_gui(
         assert stats["pause_stragglers"] == 0
 
         # --- stop -----------------------------------------------------------
-        assert controller.stop_recording(), "stop_record was refused"
+        # The blocking form: the assertions below need the file finalized, which is
+        # exactly the case `stop_recording_and_wait` exists for. The async form is
+        # covered by `test_async_commands`.
+        assert controller.stop_recording_and_wait(), "stop_record was refused"
         _pump()
         assert _state_of(controller) is RecordingState.IDLE
 
@@ -229,7 +241,7 @@ def test_pause_and_resume_are_idempotent(controller: EngineController, output_pa
         _pump()
         assert _state_of(controller) is RecordingState.RECORDING
 
-        assert controller.stop_recording()
+        assert controller.stop_recording_and_wait()
         assert output_path.is_file()
 
 
@@ -248,7 +260,7 @@ def test_stopping_while_paused_still_yields_a_valid_file(controller: EngineContr
         _record_for(1.0)
 
         assert controller.pause_recording()
-        assert controller.stop_recording(), "stopping a paused recording was refused"
+        assert controller.stop_recording_and_wait(), "stopping a paused recording was refused"
         _pump()
 
         assert finalized and finalized[-1]["valid"] is True

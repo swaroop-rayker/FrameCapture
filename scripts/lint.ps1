@@ -21,7 +21,16 @@ param(
     # Rewrite files in place instead of failing on a formatting diff.
     [switch]$Fix,
     # Skip clang-tidy (it needs a compile_commands.json; see below).
-    [switch]$SkipTidy
+    [switch]$SkipTidy,
+    # Turn every "skipped" into a failure. Pass this in CI.
+    #
+    # Locally the skips are deliberate: a C++-only contributor with no Python, or a
+    # machine without the optional Visual Studio Clang component, should still get the
+    # passes that do apply rather than a red run they learn to ignore. In CI the same
+    # leniency is a gate that reports clean while checking nothing -- there a tool is
+    # missing because the workflow forgot to install it, not because the machine is
+    # somebody's laptop. -Strict is the difference between those two situations.
+    [switch]$Strict
 )
 
 Set-StrictMode -Version Latest
@@ -29,6 +38,24 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $failed = $false
+
+function Write-Skip {
+    <#
+        A pass that did not run: a warning locally, a failure under -Strict.
+
+        One function rather than a bare warning at each site, so a skip added later
+        cannot forget to honour the flag -- which would put the hole straight back.
+    #>
+    param([Parameter(Mandatory)][string]$Message)
+
+    if ($Strict) {
+        Write-Host "SKIPPED (fatal under -Strict): $Message" -ForegroundColor Red
+        $script:failed = $true
+    }
+    else {
+        Write-Warning $Message
+    }
+}
 
 function Find-Tool {
     param([string]$Name)
@@ -62,7 +89,7 @@ $sources = Get-ChildItem -Path (Join-Path $repoRoot 'engine'), (Join-Path $repoR
     -Recurse -Include *.cpp, *.h, *.hpp -File -ErrorAction SilentlyContinue
 
 if (-not $sources) {
-    Write-Warning 'No C++ sources found.'
+    Write-Skip 'No C++ sources found under engine/ or tests/.'
 }
 
 # --------------------------------------------------------------------------
@@ -108,10 +135,10 @@ if (-not $SkipTidy) {
     $clangTidy = Find-Tool 'clang-tidy'
 
     if (-not $clangTidy) {
-        Write-Warning 'clang-tidy not found; skipping. Install "C++ Clang tools for Windows".'
+        Write-Skip 'clang-tidy not found; skipping. Install "C++ Clang tools for Windows".'
     }
     elseif (-not $compileDb) {
-        Write-Warning 'No compile_commands.json under build/; skipping clang-tidy. See the comment in this script.'
+        Write-Skip 'No compile_commands.json under build/; skipping clang-tidy. See the comment in this script.'
     }
     else {
         Write-Host "clang-tidy: $clangTidy (db: $($compileDb.FullName))"
@@ -148,7 +175,7 @@ if (-not $SkipTidy) {
         }
 
         if (-not $targets) {
-            Write-Warning 'No source file matched the compile database; skipping clang-tidy.'
+            Write-Skip 'No source file matched the compile database; skipping clang-tidy.'
         }
         else {
             $throttle = [Math]::Max(2, [Environment]::ProcessorCount)
@@ -229,6 +256,74 @@ else {
 }
 
 # --------------------------------------------------------------------------
+# Overlay capture-exclusion rules (M9.6, SPEC.md §20 row 19)
+#
+# Two rules, both about one defect: a black rectangle in the recorded video where
+# the overlay was.
+#
+#   * `WDA_MONITOR` (0x01) hides a window from captures by painting **black** into
+#     them. It is one hex digit from `WDA_EXCLUDEFROMCAPTURE` (0x11), it is what a
+#     pre-2020 search result hands you, and using it is precisely the reported
+#     "pill-shaped black cutout" bug. `test_overlay_exclusion.cpp` asserts that it
+#     still behaves that way, so the constant is not merely disliked -- it is
+#     measured.
+#   * `SetWindowDisplayAffinity` is allowed in exactly one module. The whole reason
+#     `overlay/exclusion.py` exists is that two call sites is how "the pill is
+#     excluded and the toast is not" ships.
+#
+# Separate from the C++ block above because that block's regexes are C++-specific
+# (`\bnew\s+`, `catch(...)`) and would misfire on Python prose.
+# --------------------------------------------------------------------------
+$pythonSources = Get-ChildItem -Path (Join-Path $repoRoot 'gui') -Recurse -Include *.py -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '__pycache__' }
+
+$overlayRules = @(
+    @{
+        Pattern = '\bWDA_MONITOR\b'
+        Allowed = @('framecapture_gui\overlay\exclusion.py', 'tests\test_overlay_exclusion.py')
+        Reason  = 'WDA_MONITOR paints a black rectangle into every capture; use WDA_EXCLUDEFROMCAPTURE'
+    }
+    @{
+        Pattern = '\bSetWindowDisplayAffinity\b'
+        # The test is exempt because it is *about* display affinity -- it names the API
+        # in its docstring to explain what it is measuring. Matching on prose as well as
+        # code is deliberate: a rule that only looked at calls would miss a copy-paste
+        # that had not been wired up yet, and the exemption list is two entries long.
+        Allowed = @('framecapture_gui\overlay\exclusion.py', 'tests\test_overlay_exclusion.py')
+        Reason  = 'call exclusion.exclude_from_capture() -- one module owns display affinity'
+    }
+)
+
+$overlayViolations = @()
+foreach ($file in $pythonSources) {
+    # `@(...)` because `Get-Content` returns a bare string for a one-line file and
+    # `$null` for an empty one, neither of which has a `.Count` -- which is a
+    # PowerShell footgun this script hit the first time it ran.
+    $lines = @(Get-Content -LiteralPath $file.FullName)
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        foreach ($rule in $overlayRules) {
+            if ($lines[$i] -notmatch $rule.Pattern) { continue }
+            $exempt = $false
+            foreach ($allowed in $rule.Allowed) {
+                if ($file.FullName.EndsWith($allowed)) { $exempt = $true; break }
+            }
+            if (-not $exempt) {
+                $overlayViolations += "{0}:{1}: {2}`n    {3}" -f $file.FullName, ($i + 1), $rule.Reason, $lines[$i].Trim()
+            }
+        }
+    }
+}
+
+if ($overlayViolations) {
+    Write-Host 'Overlay exclusion rules FAILED:' -ForegroundColor Red
+    $overlayViolations | ForEach-Object { Write-Host $_ }
+    $failed = $true
+}
+else {
+    Write-Host 'Overlay exclusion rules: clean'
+}
+
+# --------------------------------------------------------------------------
 # ruff + mypy (CLAUDE.md §4: "3.11+, PySide6, ruff + mypy --strict")
 #
 # Both read their configuration from pyproject.toml at the repo root, so what runs
@@ -244,9 +339,9 @@ $guiPython = Join-Path $env:LOCALAPPDATA 'FrameCapture\tools\guivenv\Scripts\pyt
 $pythonSources = Get-ChildItem -Path (Join-Path $repoRoot 'gui') -Recurse -Include *.py -File -ErrorAction SilentlyContinue
 
 if (-not (Test-Path $guiPython)) {
-    Write-Warning 'ruff/mypy SKIPPED: no GUI venv. Run scripts\bootstrap.ps1.'
+    Write-Skip 'ruff/mypy SKIPPED: no GUI venv. Run scripts\bootstrap.ps1.'
 } elseif (-not $pythonSources) {
-    Write-Host 'ruff/mypy: no Python sources under gui/'
+    Write-Skip 'ruff/mypy SKIPPED: no Python sources under gui/'
 } else {
     Write-Host "python: $guiPython ($($pythonSources.Count) files)"
 

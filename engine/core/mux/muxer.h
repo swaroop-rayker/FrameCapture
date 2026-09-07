@@ -29,12 +29,77 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace fc::mux {
+
+// ---------------------------------------------------------------------------
+// Finalization progress (M9.6 §2.1).
+//
+// SPEC.md §15.1 gives `stop_record` 30 s "since finalization is legitimately slow",
+// and BUG-046 measured how slow: ~3.3 s of remux plus ~1 s of validate for a 1.2 GB
+// recording. A GUI that says nothing for four seconds after the user presses stop is
+// indistinguishable from one that has hung, and the user's response to a hung
+// recorder is to kill it -- which is how a finished recording gets lost at the last
+// step. This reports what is happening while it happens.
+//
+// **Not a hot path.** Finalization runs after the capture and encode threads have
+// been joined, so CLAUDE.md rule 4 is not in play and a callback that blocks costs
+// only finalization time. It is still throttled, because the alternative is an event
+// per packet and a 1.2 GB file has ~96,000 of them.
+// ---------------------------------------------------------------------------
+
+/// Which stage of SPEC.md §10.4's finalization is running.
+///
+/// `Remuxing` is MP4-only -- MKV finalizes in place -- so an MKV recording goes
+/// `Flushing` -> `Validating` -> `Done` and never reports a remux percentage. That is
+/// not a bar that broke; it is a container that has no second pass.
+enum class FinalizePhase { Flushing, Remuxing, Validating, Swapping, Done };
+
+[[nodiscard]] std::string_view to_string(FinalizePhase phase) noexcept;
+
+struct FinalizeProgress {
+    FinalizePhase phase = FinalizePhase::Flushing;
+
+    /// 0..100 across the whole finalization, in the weighting `finalize_percent`
+    /// defines. Monotonic: a caller may render it directly.
+    int percent = 0;
+
+    /// Bytes read of the source, and the source's size, **during `Remuxing` only**.
+    /// Both zero in every other phase -- which is the signal that the phase has no
+    /// byte progress to report, and that a bar should render it as indeterminate
+    /// rather than as a bar that has stopped moving.
+    ///
+    /// Deliberately not faked. `Validating` is a fixed ~650-1000 ms decode of the
+    /// tail (BUG-046) with no proportional quantity behind it, and inventing one so
+    /// the number keeps rising would be a progress bar that lies about its progress.
+    std::uint64_t bytes_done = 0;
+    std::uint64_t bytes_total = 0;
+};
+
+/// Called from the finalizing thread. Never from a capture, encode or audio thread.
+using FinalizeProgressFn = std::function<void(const FinalizeProgress&)>;
+
+/// The overall percentage for a phase at `fraction` (0..1) of its own work.
+///
+/// The bands are fixed rather than derived from BUG-046's cost model, and that is a
+/// deliberate trade. A model-weighted band would put remux at 3% of the bar for a
+/// 15 MB file and 77% for a 1.2 GB one, so the same recording stopped twice at
+/// different lengths would produce visibly different bars -- and the model's inputs
+/// (packet count, disk state, page-cache warmth) are exactly the things BUG-046 found
+/// vary by more than the weighting would. Fixed bands are wrong by a predictable
+/// amount instead of wrong by an unpredictable one, and the phase label carries the
+/// information the percentage cannot.
+[[nodiscard]] int finalize_percent(FinalizePhase phase, double fraction) noexcept;
+
+/// Minimum spacing between progress callbacks. 10 Hz: fast enough that a bar moves
+/// smoothly, slow enough that a 96,000-packet remux costs 30-odd events rather than
+/// 96,000 pipe writes.
+constexpr std::int64_t kFinalizeProgressIntervalNs = 100'000'000;
 
 /// Outcome of the validation gate (SPEC.md §10.4): the output is not declared good
 /// until it has been opened, demuxed, and decoded.
@@ -329,7 +394,8 @@ struct RemuxStats {
 
 [[nodiscard]] Result<void> remux_to_progressive(const std::filesystem::path& source,
                                                 const std::filesystem::path& destination, int audio_initial_padding = 0,
-                                                RemuxStats* stats = nullptr);
+                                                RemuxStats* stats = nullptr,
+                                                const FinalizeProgressFn& on_progress = {});
 
 /// Turns the fragmented MP4 at `path` into a progressive one, in place.
 ///
@@ -340,8 +406,13 @@ struct RemuxStats {
 /// prime directive requires and the reason this is not done in place.
 ///
 /// The returned report describes the file that ends up at `path`.
+///
+/// `on_progress`, when supplied, is called through the remux and at each phase
+/// boundary. It is not called after this function returns: the terminal `Done` belongs
+/// to the caller, which is the only party that knows whether validation passed.
 [[nodiscard]] Result<ValidationReport> finalize_in_place(const std::filesystem::path& path,
                                                          const ValidationExpectation& expectation,
-                                                         int audio_initial_padding = 0);
+                                                         int audio_initial_padding = 0,
+                                                         const FinalizeProgressFn& on_progress = {});
 
 } // namespace fc::mux

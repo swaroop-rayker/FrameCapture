@@ -42,6 +42,8 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..engine import EngineController
+from ..hotkeys import Action, BindingStatus
+from .hotkey_editor import HotkeysSection
 
 
 def _select_data(combo: QComboBox, value: object) -> None:
@@ -61,13 +63,23 @@ def _select_data(combo: QComboBox, value: object) -> None:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, engine: EngineController, output_directory: Path, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        engine: EngineController,
+        output_directory: Path,
+        parent: QWidget | None = None,
+        *,
+        hotkey_statuses: dict[Action, BindingStatus] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(520)
 
         self._engine = engine
         self._output_directory = output_directory
+        #: What the hotkey manager last reported. Empty when the dialog is opened
+        #: without one, in which case the chips describe what *would* happen.
+        self._hotkey_statuses = hotkey_statuses or {}
 
         # Read before the widgets are built, so each control is constructed showing what
         # is actually in force. Populating afterwards would flash the defaults first and,
@@ -91,6 +103,7 @@ class SettingsDialog(QDialog):
         self._tabs.addTab(self._audio_tab(), "Audio")
         self._tabs.addTab(self._recording_tab(), "Recording")
         self._tabs.addTab(self._advanced_tab(), "Advanced")
+        self._tabs.addTab(self._hotkeys_tab(), "Hotkeys")
         self._tabs.addTab(self._updates_tab(), "Updates")
         self._tabs.addTab(self._about_tab(), "About")
 
@@ -450,6 +463,17 @@ class SettingsDialog(QDialog):
         form.addRow("GPU override", self._gpu_override)
         return page
 
+    def _hotkeys_tab(self) -> QWidget:
+        """SPEC.md §16.4's sections, plus the one §16.5 asks for (M9.6 F3).
+
+        Given the manager's last statuses so a binding that failed says why, right
+        next to itself, for as long as it is true. That is the whole difference
+        between a fixable complaint and "hotkeys don't work".
+        """
+        self._hotkeys = HotkeysSection()
+        self._hotkeys.load(self._current, self._hotkey_statuses)
+        return self._hotkeys
+
     def _updates_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -541,6 +565,10 @@ class SettingsDialog(QDialog):
             "log_level": str(self._log_level.currentData() or "info"),
             "gpu_override": self._gpu_override.text().strip(),
             "check_updates": self._check_updates.isChecked(),
+            # SPEC.md §16.5's bindings. Sent as the user left them; whether each one
+            # can actually be taken is Windows' answer, and the window re-applies
+            # them after the save and reports what happened.
+            **self._hotkeys.collect(),
         }
 
     def _on_accept(self) -> None:

@@ -347,3 +347,160 @@ QScrollBar::sub-page {
     height: 0;
     width: 0;
 }
+
+/* ---- the recording pill (M9.6 F1) -------------------------------------- */
+
+/* The pill's own background is painted in `paintEvent` -- it is rounded and
+   translucent, which a stylesheet on a translucent top-level window cannot do
+   reliably. Everything inside it is styled here. */
+
+/* The universal `QWidget { background-color: @bg-base; }` at the top of this file
+   applies to the pill's containers too, and `bg-base` is darker than the `bg-surface`
+   the pill paints itself with -- so the stack and its pages filled a square dark
+   rectangle over the middle of a rounded translucent pill. Every child that is not
+   deliberately styled has to opt out. */
+
+#RecordingPill QLabel,
+#RecordingPill QStackedWidget,
+#RecordingPill QStackedWidget > QWidget,
+#PillDot {
+    background: transparent;
+}
+
+/* Width is pinned in `pill.py` rather than here: Qt has no `font-variant-numeric`
+   (it warns and ignores it), so the layout is kept still by reserving the width of
+   the widest time string instead of by asking for tabular figures. */
+#PillElapsed {
+    color: @text-primary;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+#PillSize {
+    color: @text-secondary;
+    font-size: 13px;
+}
+
+#PillSeparator {
+    color: @text-disabled;
+    font-size: 13px;
+}
+
+#PillPhase {
+    color: @text-secondary;
+    font-size: 13px;
+}
+
+#PillPhase[state="failed"] {
+    color: @warn;
+    font-weight: 600;
+}
+
+#PillProgress {
+    background: @bg-elevated;
+    border: none;
+    border-radius: 3px;
+}
+
+#PillProgress::chunk {
+    background: @accent;
+    border-radius: 3px;
+}
+
+#PillButton {
+    background: @bg-elevated;
+    color: @text-primary;
+    border: 1px solid @border;
+    border-radius: 14px;
+    font-size: 12px;
+    padding: 0;
+}
+
+#PillButton:hover {
+    background: @border;
+}
+
+#PillButton:disabled {
+    color: @text-disabled;
+    background: @bg-surface;
+}
+
+/* A property selector rather than a second objectName: `setObjectName` replaces the
+   name, so a `#PillStop` button would stop matching `#PillButton` above and lose its
+   background, border and radius. */
+#PillButton[variant="stop"] {
+    color: @rec-active;
+}
+
+#PillButton[variant="stop"]:disabled {
+    color: @text-disabled;
+}
+
+/* ---- toast notifications (M9.6 F2) ------------------------------------- */
+
+/* Same opt-out as the pill, and for the same reason (BUG-051): the universal
+   `QWidget { background-color: @bg-base; }` at the top of this file would otherwise
+   paint a hard-edged rectangle inside a rounded, translucent toast. Every child of a
+   self-painted overlay has to be named here. */
+
+/* Labels only. `#Toast QWidget` would be *more* specific than `#ToastAction`
+   (one id + one type beats one id) and would strip the action button's background --
+   BUG-050's trap wearing a selector instead of an object name. A toast has no
+   container widgets of its own, so labels are the whole list. */
+#Toast QLabel {
+    background: transparent;
+}
+
+#ToastText {
+    color: @text-primary;
+    font-size: 13px;
+}
+
+#ToastDetail {
+    color: @text-secondary;
+    font-size: 12px;
+}
+
+#ToastCount {
+    color: @text-secondary;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+#ToastAction {
+    background: @bg-elevated;
+    color: @accent;
+    border: 1px solid @border;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 12px;
+}
+
+#ToastAction:hover {
+    background: @border;
+    color: @accent-hover;
+}
+
+/* ---- the hotkeys settings section (M9.6 F3) ---------------------------- */
+
+/* The chip beside each binding. Its `state` property carries the severity, so the
+   colour is one place and the logic that decides it is another (BUG-050's lesson:
+   a variant is a property, never a replacement object name). */
+
+/* The section is the only place in the settings dialog with a `QGroupBox`, and a
+   group box is `bg-surface` while the universal rule paints its child labels
+   `bg-base` -- so every label showed as a darker box inside it. BUG-051 again, third
+   time: a self-coloured container has to opt its children out. */
+#HotkeysSection QLabel {
+    background: transparent;
+}
+
+#HotkeyChip {
+    font-size: 12px;
+    padding: 2px 0;
+}
+
+#HotkeyChip[state="ok"]   { color: @ok; }
+#HotkeyChip[state="info"] { color: @text-secondary; }
+#HotkeyChip[state="bad"]  { color: @warn; }
+#HotkeyChip[state="off"]  { color: @text-disabled; }

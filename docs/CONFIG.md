@@ -82,16 +82,32 @@ either the old file or the new one, never a mixture.
 
 | Key | Type | Range | Default | Since |
 | --- | --- | --- | --- | --- |
-| `schema_version` | integer | 1–1000 | `1` | 1 |
+| `schema_version` | integer | 1–1000 | `2` | 1 |
 
 Identifies the on-disk shape. On load, a **lower** value runs the ordered migration
 chain (`migrate_1_to_2`, `migrate_2_to_3`, …) after backing the file up; a **higher**
-value loads read-only and is never rewritten.
+value loads read-only and is never rewritten. A missing link is a hard error rather
+than a skipped version, so the file can never end up at an intermediate shape while
+claiming the target version.
 
-v1 is the first schema, so there are no migration steps yet. The chain machinery —
-ordering, gap detection, backup, per-step logging — is implemented and tested; a
-missing link is a hard error rather than a skipped version, so the file can never end
-up at an intermediate shape while claiming the target version.
+### Migration history
+
+| Step | Change |
+| --- | --- |
+| `migrate_1_to_2` | Adds `[hotkeys]`, `[overlay]` and `[window]` (M9.6). |
+
+`migrate_1_to_2` **writes nothing.** All three sections are new and every key in them has a
+default, and an absent key already loads as its default — so a v1 file read by this
+build produces exactly the values the step would have inserted. What the step
+contributes is the version stamp and, through `run_migrations`, the backup to
+`config.toml.bak.1` that SPEC.md §17 promises before a file is rewritten. A v1 file is
+rewritten the moment any setting is saved, so that backup is not hypothetical.
+
+It exists as a step rather than the chain simply accepting a v1 document because
+`run_migrations` refuses a version it has no step for — deliberately, since a silent
+version bump is how a document reaches an intermediate shape with a header claiming
+otherwise. A step that transforms nothing is still a link, and the chain's value is
+that every link is present.
 
 ## `[general]`
 
@@ -307,6 +323,106 @@ binds no sockets and contains no network code at all — FFmpeg is built with
 cannot cause the engine to reach the network. Updates never install while a recording
 is active (SPEC.md §21.3).
 
+## `[hotkeys]`
+
+| Key | Type | Range | Default | Since |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | — | `true` | 2 |
+| `start` | string | key sequence | `Ctrl+Shift+F9` | 2 |
+| `stop` | string | key sequence | `Ctrl+Shift+F9` | 2 |
+| `pause_resume` | string | key sequence | `Ctrl+Shift+F10` | 2 |
+
+SPEC.md §16.5's rebindable global hotkeys. **The engine stores these and never acts on
+them** — `RegisterHotKey` belongs to the GUI, which is the process with a message pump
+to receive `WM_HOTKEY` on. They live here because §17 makes `config.toml` the single
+settings store, and a separate GUI settings file would be the second source of truth
+§17 exists to prevent.
+
+- **Sequences** are written the way a user would: modifiers joined by `+`, then one
+  key — `Ctrl+Shift+F9`, `Alt+F10`, `Ctrl+Alt+Home`. At least one modifier is
+  required; a bare key would swallow that key system-wide.
+- **Nothing here validates a sequence.** Whether it *parses* is the GUI's
+  `parse_sequence`, and whether it can actually be *bound* is Windows' answer to
+  `RegisterHotKey` — another application may already own the combination. Neither can
+  be answered from the engine, so an unusable sequence costs one accelerator and a
+  reported conflict, never a failed config load.
+- **`start` and `stop` share a default deliberately.** That one sequence is the
+  start/stop toggle FrameCapture shipped with; expressing it as two identical bindings
+  keeps the familiar behaviour while making the two actions separable for anyone who
+  wants separate keys. When two actions name the same sequence, one hotkey is
+  registered and dispatched as a toggle by the current recording state.
+- **`enabled = false`** unregisters everything. The in-window controls are unaffected.
+
+## `[overlay]`
+
+| Key | Type | Range | Default | Since |
+| --- | --- | --- | --- | --- |
+| `pill_enabled` | boolean | — | `true` | 2 |
+| `pill_corner` | enum | `top-left` `top-right` `bottom-left` `bottom-right` | `bottom-right` | 2 |
+| `pill_monitor` | string | display device path | `""` (the captured monitor) | 2 |
+| `pill_x` | integer | −32768–32767 | `-1` (unplaced) | 2 |
+| `pill_y` | integer | −32768–32767 | `-1` (unplaced) | 2 |
+| `toasts_enabled` | boolean | — | `true` | 2 |
+| `toast_corner` | enum | `top-left` `top-right` `bottom-left` `bottom-right` | `top-right` | 2 |
+| `toast_duration_s` | integer | 1–60 | `4` | 2 |
+| `toast_max_visible` | integer | 1–8 | `4` | 2 |
+
+The floating recording pill and the toast notifications. Both are GUI windows; the
+engine stores their placement and draws nothing. Stored here for the same reason as
+`[hotkeys]`.
+
+What keeps them **out of the recording** is not a setting: every overlay window is
+stamped with `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`, which makes DWM
+composite the capture surface as though the window were not there. The older
+`WDA_MONITOR` would paint a black rectangle instead, which is the "black cutout"
+defect and is why that constant is a banned pattern in `scripts/lint.ps1`.
+
+- **`pill_enabled`** — when the exclusion probe at startup reports the affinity was
+  refused, the pill is suppressed regardless of this setting and the GUI says why.
+  Showing an overlay that would land in the file is never the fallback.
+- **`pill_monitor`** — a display device path, not an index; indices reshuffle on
+  hotplug (SPEC.md §4.1). Empty means "whichever monitor is being captured".
+- **`pill_x` / `pill_y`** — virtual-desktop coordinates of the pill's top-left once the
+  user has dragged it. `-1` means never dragged, so `pill_corner` decides. `-1` rather
+  than `0` because `0,0` is a real position — the top-left of the primary monitor — and
+  "unplaced" has to be distinguishable from "placed there deliberately". A remembered
+  position on a monitor that no longer exists is clamped back on screen at startup.
+- **`toast_duration_s`** — how long an *informational* toast stays up. Warnings get
+  longer and errors stay until dismissed; both are the GUI's policy and this is the
+  number they scale from.
+- **`toast_max_visible`** — how many stack at once. Further toasts queue, and the queue
+  is capped so an error burst cannot grow it without bound.
+
+---
+
+## `[window]`
+
+| Key | Type | Range | Default | Since |
+| --- | --- | --- | --- | --- |
+| `show_preview` | boolean | — | `true` | 2 |
+| `show_sources` | boolean | — | `true` | 2 |
+| `show_audio_mixer` | boolean | — | `true` | 2 |
+| `show_controls` | boolean | — | `true` | 2 |
+| `show_status` | boolean | — | `true` | 2 |
+| `always_on_top` | boolean | — | `false` | 2 |
+
+Which parts of the main window are on screen. Written by the GUI's **View** menu; the
+engine stores them and has no window of its own. Stored here for the same reason as
+`[hotkeys]` and `[overlay]`: SPEC.md §17 makes this file the only settings store, and a
+second one for the GUI's own keys would be the second source of truth §17 forbids.
+
+Every panel defaults to shown. SPEC.md §16.2 draws the whole window, so a panel is
+absent only because a user hid it — and a config file written before this milestone,
+which has no `[window]` section at all, loads as the layout the spec draws.
+
+- **`always_on_top`** — the exception, and it defaults **off**. It changes how the
+  window behaves against every other application on the machine, which is not a default
+  anyone asked for.
+- **View ▸ Reset layout** restores every key in this section to its default in one
+  save. It deliberately leaves `[overlay]` alone: the pill and the notifications are not
+  layout, and a user who turned the notifications off did not ask for them back because
+  they wanted their panels rearranged.
+
 ---
 
 ## Example
@@ -314,7 +430,7 @@ is active (SPEC.md §21.3).
 A complete file at defaults. Everything is optional; omitted keys use the default.
 
 ```toml
-schema_version = 1
+schema_version = 2
 
 [general]
 output_directory = "C:\\Users\\you\\Videos\\FrameCapture"
@@ -361,4 +477,29 @@ gpu_override = ""
 
 [updates]
 check_enabled = true
+
+[hotkeys]
+enabled = true
+start = "Ctrl+Shift+F9"
+stop = "Ctrl+Shift+F9"
+pause_resume = "Ctrl+Shift+F10"
+
+[overlay]
+pill_enabled = true
+pill_corner = "bottom-right"
+pill_monitor = ""
+pill_x = -1
+pill_y = -1
+toasts_enabled = true
+toast_corner = "top-right"
+toast_duration_s = 4
+toast_max_visible = 4
+
+[window]
+show_preview = true
+show_sources = true
+show_audio_mixer = true
+show_controls = true
+show_status = true
+always_on_top = false
 ```

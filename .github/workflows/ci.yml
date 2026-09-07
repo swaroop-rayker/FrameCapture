@@ -1,0 +1,172 @@
+# Pull requests and pushes to main, on a hosted runner (M9.6 plan §7.1).
+#
+# SPEC.md §20.1: "GitHub Actions `windows-latest` for build + unit tests; a self-hosted
+# runner on the reference rig for all GPU/capture/soak tests (hosted runners have no real
+# GPU and will silently pass meaningless tests)."
+#
+# That sentence is the design of this file. Everything here is the CPU tier and the
+# hardware-free half of the Python suite; the GPU tier is `gpu.yml` and never runs here.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  # A new push to a branch makes the previous run's answer irrelevant. Cancelling it
+  # frees a runner and stops a stale red badge outliving the commit that caused it.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Repository gates
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          # pr-gates diffs against the merge base, which does not exist in a shallow
+          # clone. Without this the gate reports "could not diff" on every PR.
+          fetch-depth: 0
+
+      - name: Detectors still recognise the codebase
+        shell: pwsh
+        run: .\scripts\pr-gates.ps1 -SelfTest
+
+      - name: LICENSE and documentation pairs
+        shell: pwsh
+        run: |
+          # On a pull request, judge only what the branch changed. On a push to main
+          # there is no base ref to compare against, so the LICENSE gate runs alone.
+          if ($env:GITHUB_BASE_REF) {
+            .\scripts\pr-gates.ps1 -BaseRef "origin/$env:GITHUB_BASE_REF"
+          } else {
+            .\scripts\pr-gates.ps1
+          }
+
+  build-test:
+    name: Build and test
+    runs-on: windows-latest
+    # A cold build compiles FFmpeg with x264 from source. The cache below is what keeps
+    # this in single digits of minutes; the timeout is sized for the day the cache misses.
+    timeout-minutes: 120
+    env:
+      # A local directory, cached by the step below. The NuGet/GitHub Packages backend is
+      # the upgrade if this ever exceeds the 10 GB per-repository cache limit; it needs a
+      # token, and this does not, which is why it is the starting point.
+      VCPKG_BINARY_SOURCES: 'clear;files,${{ github.workspace }}\vcpkg-cache,readwrite'
+    steps:
+      - name: Normalise line endings before checkout
+        shell: pwsh
+        run: |
+          # The index stores LF. Git for Windows defaults to core.autocrlf=true, which
+          # would check every file out as CRLF and make clang-format's and ruff's view of
+          # the tree differ from the committed one. `input` gives an LF worktree, which is
+          # what the index holds. See M9_6_CHANGES.md §8 for the same hazard locally.
+          git config --global core.autocrlf input
+
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # SPEC.md §16.1 requires 3.11+. Pinned to a minor so a new release cannot change
+          # what mypy --strict accepts on a day nobody touched the code.
+          python-version: '3.12'
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg-cache
+            vcpkg
+          # `vcpkg.json` carries the dependency set *and* the builtin-baseline, and
+          # `ports/**` carries the FFmpeg feature whitelist -- a change to either produces
+          # different binaries, so both belong in the key. Without ports/** a whitelist
+          # edit would silently restore the previous build's FFmpeg.
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'ports/**') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: Bootstrap
+        shell: pwsh
+        run: .\scripts\bootstrap.ps1
+
+      - name: Install the lint toolchain
+        shell: pwsh
+        run: |
+          # Into the exact path scripts/lint.ps1 falls back to (BUILD.md §4.2), so CI runs
+          # the same binaries a developer does.
+          #
+          # Pinned. clang-format's output changes between releases, so an unpinned install
+          # turns "someone published a new LLVM" into "every PR fails on formatting" on a
+          # morning when nobody changed any code.
+          $venv = Join-Path $env:LOCALAPPDATA 'FrameCapture\tools\lintvenv'
+          python -m venv $venv
+          & (Join-Path $venv 'Scripts\python.exe') -m pip install --quiet --upgrade pip
+          & (Join-Path $venv 'Scripts\python.exe') -m pip install --quiet clang-format==22.1.8 clang-tidy==22.1.8
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset windows-msvc-release
+
+      - name: Configure the clang-tidy compile database
+        shell: pwsh
+        run: |
+          # clang-tidy needs a compile_commands.json, which the Visual Studio generator
+          # cannot produce -- hence a second, Ninja configure. CLAUDE.md §3 notes this
+          # database goes stale when a source file is added, and lint.ps1 fails rather
+          # than silently checking a shrinking fraction of the tree (BUG-005). Generating
+          # it fresh here is what makes that failure impossible in CI.
+          cmake -B build/tidy -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON --preset windows-msvc-debug
+
+      - name: Lint
+        shell: pwsh
+        run: |
+          # -Strict turns every "skipped" into a failure. Without it a missing clang-tidy
+          # or a missing venv leaves this step green while checking nothing, which is the
+          # one outcome worse than not having the job at all.
+          #
+          # Before the build and after the configure: a formatting failure should not wait
+          # on a forty-minute compile, but clang-tidy cannot run without the database above.
+          .\scripts\lint.ps1 -Strict
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset windows-msvc-release --parallel
+
+      - name: Test — CPU tier
+        shell: pwsh
+        run: |
+          # -LE gpu, never -L gpu. SPEC.md §20.1: a hosted runner has no real GPU and
+          # would pass the hardware tier meaninglessly, which is worse than not running it.
+          ctest --preset windows-msvc-release -LE gpu --output-on-failure
+
+      - name: Test — Python
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          # `-m "not engine"` for the same reason the GPU tier is excluded: the
+          # engine-marked cases spawn a real engine and record the screen, and a hosted
+          # runner has neither a GPU nor a desktop being composited. They run in gpu.yml.
+          $python = Join-Path $env:LOCALAPPDATA 'FrameCapture\tools\guivenv\Scripts\python.exe'
+          & $python -m pytest gui/tests -v -m "not engine" --junitxml=junit.xml
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-logs
+          path: |
+            build/windows-msvc-release/Testing/**/LastTest.log
+            junit.xml
+          if-no-files-found: ignore

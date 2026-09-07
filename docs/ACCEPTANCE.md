@@ -1,8 +1,9 @@
 # Acceptance Matrix — SPEC.md §20 rows → the tests that cover them
 
 SPEC.md §20 says *"Each row must have a named, automated test. A row without a
-green test is an incomplete feature."* and M10's exit criterion is **all 18 rows
-green**. That audit needs something to audit against, because the test names in the
+green test is an incomplete feature."* and M10's exit criterion is **all 22 rows
+green** (eighteen until M9.6 added four; §0.3 question 1, answered by the owner on
+2026-09-06). That audit needs something to audit against, because the test names in the
 tree do not match the names in the spec — deliberately, in most cases: SPEC.md
 names a *subject* (`test_no_black_frames`), and GoogleTest names in this repo are
 assertions (`NoFrameIsEverUniform`). A file called `test_no_black_frames.cpp`
@@ -18,17 +19,19 @@ Status values:
 - **Partial** — something covers part of the row; what is missing is stated.
 - **Pending** — no coverage, with the milestone that owns it.
 
-**As of M9.5 (2026-08-05): 17 Green, 1 Partial, 0 Pending.** The one Partial is row 12,
+**As of M9.6 (2026-09-07): 21 Green, 1 Partial, 0 Pending.** The one Partial is row 12,
 and what it is missing cannot be supplied by writing a test: this rig has a single render
 endpoint, so `IMMNotificationClient` firing on a genuine device change needs a second
 audio device. Every other row has a named, passing test on the tier stated.
 
-Suite sizes the rows above were measured with: **CPU 417**, **GPU 193**, **pytest 75**,
-green on all three presets.
+Suite sizes the rows above were measured with: **CPU 434**, **GPU 199** (and 198 + 1
+skipped when the GPU tier is run as a single process, which is the stricter form — see
+`TESTING.md`), **pytest 312** hardware-free plus **17** engine-backed. Green on the
+release preset; the M9.5 figures were green on all three.
 
 ---
 
-## The 18 rows
+## The 22 rows
 
 | # | Symptom | Status | Milestone | Covering tests |
 |---|---|---|---|---|
@@ -50,6 +53,10 @@ green on all three presets.
 | 16 | Multi-track on MP4 | **Green** | M9.5 | Three layers, each asserted separately. `MultitrackTest.MultiTrackOnMp4IsRefusedByTheEngineAndNotOnlyByTheGui` (gpu) refuses at `VideoPipeline::start` with `MULTITRACK_REQUIRES_MKV` and leaves no file behind; `TheSameConfigurationOnMkvIsAccepted` is its positive control. `test_the_engine_refuses_multi_track_audio_on_mp4` (pytest) sends the `configure` command §8.6 names, from a separate process, and asserts code **3021** *and* that nothing was half-applied. `Muxer::open` refuses independently as the last line — with both the pipeline and the muxer checks removed the gpu case goes red, which is how the defence in depth was verified rather than assumed. The GUI half is `test_multi_track_on_mp4_is_explained_inline_rather_than_silently_greyed` (pytest), row 16's "inline reason string" |
 | 17 | Wrong channel layout | **Green** | M4 | `ChannelLayoutTest.*` (gpu) — 5.1, 7.1, stereo, pinned and auto, **in both containers**, asserting the container mask, the decoder-derived layout, and per-channel tone identity. `AudioEncodeTest.*` covers signalling sites 1 and 2 on the encoder. **Amended 2026-08-06 (BUG-048):** §8.5's pin overrides the endpoint *downward only* — `AudioCaptureTest.ALayoutWiderThanTheEndpointFallsBackToTheEndpointsOwn` (gpu) drives the reported 7.1-on-stereo case and its three controls. **Read the note below before quoting this row:** every assertion in `ChannelLayoutTest` was true of a file whose audio Windows would not play |
 | 18 | Pause/resume desync or freeze | **Green** | **M8a**, amended **2026-08-03** | Two cases with **two different clocks**, because the first alone was not the row. **Synthetic clock** — `PauseResumeTest.*` (gpu, 3): `ThreePausesExciseTheirTimeFromBothStreamsAndNothingElse` runs row 18's shape, three *uneven* pauses (1.5 s, 0.4 s, 2.7 s) totalling **4600 ms**; the file holds **exactly 420 frames**, worst A/V offset **−0.188 ms** against the 20 ms limit, growth **−0.188 ms**, **0 repeated barcodes, 0 duplicates, 0 stragglers**, byte-identical on all three presets. **Real device clock** — `LoopbackPauseTest.PausingARecordingDoesNotDesyncTheAudioTrackFromTheDeviceClock` (gpu): `AudioSource::SystemLoopback`, real time, `pause()`/`resume()` reading QPC themselves. Worst drift **+9 / +8 / +7 µs** on release / relwithdebinfo / debug against §8.4's 40,000 µs hard band, **0 soft and 0 hard resyncs on all three**, over 2×4 s with a ~2005 ms pause. Unlike the synthetic case the figures are not identical across presets — the feed rate is not (382 / 288 / 194 frames) — and that is the point: the quantity being measured is the one a supplied clock cannot produce. Deterministic form on the CPU tier: `AudioPathTest.APausedSpanIsExcisedFromTheDriftReferenceAsWellAsFromTheTrack`. Also `RedundantPausesSucceedAndStoppingWhilePausedStillYieldsAValidFile` (§7.5's idempotence and stop-while-paused), `PauseClock.*` (cpu, 12), and `test_a_second_recording_in_the_same_engine_process_runs` (pytest). **Read "What each of row 18's two clocks proves" below before quoting this row** — the synthetic case was Green on its own for a fortnight while the live path was corrupting audio |
+| 19 | Overlay in the recording, or a black rectangle where it was | **Green** | M9.6 | `OverlayExclusionTest.*` (gpu, 6) — a real capture on **both** backends, with the overlay window actually on screen, measured by mean luma and by the fraction of the frame the overlay covers. Stable over four consecutive full-suite runs in one process: unstamped control **145.8** mean luma / **1.0000** overlay fraction on WGC *and* DDA — 145.8 being exactly the BT.709 luma of the test overlay's orange, so the control proves the capture can see it; `WDA_MONITOR` **0.0 / 0.0000**, which is the black-cutout defect measured rather than described; `WDA_EXCLUDEFROMCAPTURE` **255.0 / 0.0000** on both backends, the fixture's white bar coming through intact. **DDA honours the affinity**, which is the finding that made the planned WGC-only fallback ladder unnecessary. `test_overlay_exclusion.py` (pytest, 9) covers the primitive, the read-back verification, re-application on `WinIdChange`, and the popup guard. `WDA_MONITOR` is a banned pattern in `scripts/lint.ps1`, and `SetWindowDisplayAffinity` may appear in exactly one module |
+| 20 | Overlay control unresponsive, or clicking it minimizes a fullscreen game | **Green** | M9.6 | Two halves, because a frozen pill has two independent causes. **The loop stays alive** — `test_the_event_loop_keeps_running_while_a_recording_is_finalized` (pytest, engine-backed, both containers): a 50 ms `QTimer` counts how often the GUI thread got control during a **real** `stop_record`. Measured **4 ticks (MKV) and 5 ticks (MP4)**, where the old synchronous stop gives **zero by construction**. **The widget actually repaints** — `test_overlay_responsiveness.py` (pytest, 6): **9.8 paints/s** against row 20's floor of 8 over a mocked save at the engine's 10 Hz cadence, and 50 of 50 progress updates reaching the screen. Paint cost measured inside `paintEvent`: **mean 0.124 ms, worst 0.459 ms** over 127 real paints. **The click is acknowledged locally** — stop **0.120 ms**, pause **0.022 ms**, both against a 16.7 ms frame and both measured with no engine attached, so the number is the acknowledgement and not the round trip. **Activation** — `WindowDoesNotAcceptFocus` and `NoFocus` asserted directly. See the note below for what the 3% budget figure is and is not |
+| 21 | A bound hotkey does nothing | **Green** | M9.6 | `test_hotkeys.py` (pytest, 70). Three areas, each of which was a real way for the row to happen. **The virtual-key table** went from F1–F24/A–Z/0–9 to the full set a user reaches for — `Home`, `End`, `Insert`, `Delete`, `Page Up`/`Down`, the arrows, the numpad and punctuation were all *silently refused* before (BUG-053, found from a user report). **Conflict state persists**: a refused binding reports beside that binding for as long as the refusal holds, rather than once in a status bar that clears in twelve seconds. **Dispatch by predicate** on a shared sequence, so `start` and `stop` on one key is a toggle rather than a start-and-immediately-stop. Sequences are normalised to Windows' own modifier order, so `Shift+Ctrl+F9` and `Ctrl+Shift+F9` cannot register as two conflicting bindings for the same key. `WM_HOTKEY` reaching the pump at all is row 20's async path |
+| 22 | Save progress never completes, or the control closes before the file is written | **Green** | M9.6 | `FinalizeProgressTest.*` (cpu, 7) covers the event's contract: percent monotonic, only `done` reaching 100, `done` emitted **only after the validation gate passes**, and byte counts present in the remux phase and absent from the phases that have no proportional quantity. The end-to-end half is `test_the_event_loop_keeps_running_while_a_recording_is_finalized` (pytest, engine-backed) against a real engine and a real file: **MKV `['validating', 'done']`, MP4 `['flushing', 'remuxing', 'validating', 'swapping', 'done']`**, percent monotonic to 100, `done` last, and the file valid. The container asymmetry is the point — MKV has no remux, so an MKV reporting one would be a bar inventing work. The pill closes on `recording_finalized` with `valid: true` and on nothing else: `test_overlay_pill.py` asserts it stays up, in warn colour, on `valid: false` |
 
 ---
 
@@ -1462,6 +1469,123 @@ media-pipeline requirement, and because each of these changes what gets built.
     (there is no surround information in a stereo capture to preserve) and is a shape
     §8.5's "channel layout is pinned for the lifetime of the file" does not obviously
     anticipate, since it now means *per stream* rather than *per file*.
+
+M9.6's three questions were put in `M9_6_PLAN.md` §0.3 and **all three are answered**:
+
+- ~~**Do rows 19-22 join §20?**~~ **Answered 2026-09-06: yes.** §20 is twenty-two rows and
+  §25's Definition of Done reads "all 22". Both edits are made.
+- ~~**Three hotkey bindings or two?**~~ **Answered during Phase 3: three** — `start`, `stop`
+  and `pause_resume`, with `start` and `stop` sharing a default so the familiar toggle
+  survives.
+- ~~**Is the recording pill on by default?**~~ **Answered 2026-09-06: yes**, gated on the
+  capture-exclusion probe, so it can never reach a recording.
+
+**One new question, and it is now a CI gate rather than a note.** The repository has no
+`LICENSE` file, and `scripts/pr-gates.ps1` fails without one — deliberately (M9.6 plan
+§7.4). CLAUDE.md §9 already records the position: libx264 is in, `--enable-gpl` is set, the
+distributed binary is therefore **GPLv2**, and that obliges source availability for the
+distributed work while being incompatible with a proprietary licence. The obligation exists
+whether or not the gate does. What the gate adds is that §21's packaging work cannot start
+without the question being answered first, which is what CLAUDE.md §9 asked for when it
+said to flag it rather than work around it.
+
+**Two SPEC amendments were made under M9.6 rather than asked about**, because in both cases
+the alternative was a spec sentence that contradicted a measurement:
+
+- **§15.1's timeout sentence now names `recover` alongside `stop_record`.** It named only
+  `stop_record` because nothing called `recover`; M9.6 Phase 4 gave it a caller, and it runs
+  the same lossless remux — ~3.3 s plus ~1 s of validate on a 1.2 GB file (BUG-046). At 5 s
+  it would time out on every recording worth recovering.
+- **§16.2 and §16.4 gained the overlay, the menus and the Hotkeys section**, which describe
+  what was built rather than changing what was required.
+
+## M9.6's four rows, and what they do *not* cover
+
+Rows 19–22 joined §20 on 2026-09-06 by the owner's decision, taking the matrix to
+twenty-two and §25's Definition of Done to "all 22". Four notes, in the order they would
+mislead someone quoting the rows.
+
+### Row 19 is measured against a capture, not against an API return value
+
+The tempting version of this test asserts that `SetWindowDisplayAffinity` returned
+`TRUE`. That would have passed for `WDA_MONITOR` as readily as for
+`WDA_EXCLUDEFROMCAPTURE` — both succeed, and one of them paints black into every frame.
+The two constants are one hex digit apart (`0x11` and `0x01`), and the wrong one is what
+a search result from before 2020 hands you.
+
+So the row is measured on decoded frames: mean luma and the fraction of the frame the
+overlay covers, with the overlay genuinely on screen, on both capture backends. The
+control matters as much as the assertion — an unstamped overlay reads **145.8** mean luma
+and **1.0000** coverage, which is what proves the capture could see it in the first place.
+A test that only ever saw the excluded case would pass on a capture that was broken.
+
+**What it does not cover.** One machine, one GPU pair, one Windows build. The affinity is
+a DWM behaviour and it is honoured here on both WGC and DDA; a machine whose compositor
+is off, or a remote session, has not been tried. `ExclusionSupport.UNSUPPORTED` is the
+designed answer to that and it is exercised, but only by forcing it.
+
+### Row 20's 3% figure is not measured, and this is what is measured instead
+
+SPEC.md §16.1 caps GUI CPU at **3% while recording**. That is a process-wide number over
+a real recording, and **it is not measured here.** Reporting a 3% pass would need a
+sampler running against the GUI process during a genuine capture, and no test does that.
+
+What is measured is the cost of the thing M9.6 added to that budget:
+
+| Quantity | Measured |
+|---|---|
+| Pill repaint, inside `paintEvent` | mean **0.124 ms**, worst **0.459 ms** over 127 paints |
+| Repaint rate during a save | **9.8 paints/s** against row 20's floor of 8 |
+| Click → visual acknowledgement | stop **0.120 ms**, pause **0.022 ms** against a 16.7 ms frame |
+| Event-loop ticks during a real `stop_record` | **4** (MKV), **5** (MP4); zero under the old synchronous stop |
+
+At the pill's 10 Hz repaint rate, 0.124 ms per paint is **1.24 ms of CPU per second, about
+0.12% of one core**. That is an arithmetic consequence of the two measurements above, not
+a measurement of the process, and it is quoted here only to say that the overlay is not
+plausibly the reason the 3% budget would be missed. **The §16.1 figure itself remains
+unmeasured and belongs to M10's acceptance suite**, alongside the idle-CPU figure §25
+also asks for.
+
+The event-loop tick counts deserve one caveat: the recordings under test are one second
+long, so their finalization is ~200 ms and 4–5 ticks is what that produces. The count
+proves the loop *ran*, which is the row. It does not establish a sustained rate over the
+30-second finalization §15.1 budgets for — BUG-046 measured that shape at ~3.3 s of remux
+plus ~1 s of validate on a 1.2 GB file, and no test drives a file that large.
+
+### Row 21 is a pytest row, and the thing it cannot test is `RegisterHotKey` itself
+
+Every assertion is on this side of the Windows API: that the sequence parses, that the
+right virtual key comes out, that a conflict is retained and reported, that a shared
+sequence dispatches to the binding whose precondition holds. Whether Windows then
+delivers `WM_HOTKEY` is not asserted, because a test that registered real global hotkeys
+would fight the developer's own key bindings and would fail differently depending on what
+else was running.
+
+**What that leaves uncovered:** the end-to-end path from a physical key press to a
+recording starting. It is exercised by hand and by the toast each hotkey raises; it has no
+automated case. The row's *named* causes are all covered — the VK table, the persistent
+conflict, and the blocked pump — which is why it reads Green rather than Partial.
+
+### Row 22's container asymmetry is the assertion, not an inconsistency
+
+MKV reports `['validating', 'done']`; MP4 reports
+`['flushing', 'remuxing', 'validating', 'swapping', 'done']`. That is not one of them
+being wrong. §10.3 gives MP4 a fragmented-then-remuxed path and gives MKV none, so an MKV
+stop that reported a remux would be a progress bar announcing work the container does not
+do — and the test asserts the *absence* for MKV as firmly as the presence for MP4.
+
+The property that matters most is the one that is easiest to get wrong in a way nobody
+notices: **`done` is emitted only after the validation gate passes, and the pill closes
+only on `recording_finalized` with `valid: true`.** A bar that reached 100% on the stop
+command returning would be the recorder claiming success it had not verified, which
+CLAUDE.md §1 makes the one unacceptable outcome. `valid: false` leaves the pill on screen
+saying so.
+
+**What it does not cover:** a finalization that fails *midway* — the engine dying between
+`flushing` and `done`. The pill's designed answer is to stay up and hand off to §10.4's
+recovery path, and `test_overlay_pill.py` covers the widget's half, but no test kills an
+engine mid-finalize and watches what the GUI does. That is row 3's territory
+(`CrashRecoveryTest`) from the engine side; the GUI-side pairing is not written.
 
 ## Why the names differ
 

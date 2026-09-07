@@ -98,6 +98,16 @@ enum class Event {
     DegradationChanged,
     SegmentRolled,
     RecordingFinalized,
+
+    /// SPEC.md §10.4's finalization, reported while it runs (M9.6 §2.1).
+    ///
+    /// Additive under §15.1's compatibility rule -- an older GUI does not recognise the
+    /// name and ignores it, which is exactly the behaviour that rule requires. Emitted
+    /// **while `stop_record` is still in flight**: the request thread is inside
+    /// `RecordingSession::stop`, and `PipeServer::send_event` is a write that serialises
+    /// independently of the read loop, so the events reach the peer before the response
+    /// they precede.
+    FinalizeProgress,
 };
 
 [[nodiscard]] std::string_view to_string(Event event) noexcept;

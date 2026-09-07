@@ -46,7 +46,7 @@ inheritable ACEs from widening it.
 {"cmd":"hello","id":"1","proto":"1.0","client":"gui/1.0.0"}
 
 // engine → GUI
-{"id":"1","ok":true,"proto":"1.0","engine":"framecapture-engine",
+{"id":"1","ok":true,"proto":"1.0","engine":"framecapture-engine","version":"0.1.0",
  "session":"a1b2c3…","capabilities":["pause_resume","heartbeat","segments","preview",
  "multitrack","gpu_migration","audio_device_migration","degradation_ladder",
  "crash_recovery"]}
@@ -54,6 +54,14 @@ inheritable ACEs from widening it.
 
 Capabilities are the additive feature flags §15.1 requires, and the list is honest: a
 flag is a promise the feature works, not that code for it exists.
+
+**`version` — added in M9.6.** The engine binary's own version, from the CMake
+`project()` declaration, which is *not* the GUI's `__version__`: the two are separate
+artefacts with separate version numbers and they already disagree. It is what Help ▸
+About and Tools' diagnostics summary report, because the first question any report about
+this application needs answered is which build produced the file. Additive, so a GUI
+reading an engine that predates it sees an absent field and renders "unknown" rather
+than failing the handshake.
 
 `multitrack` says the **engine** implements SPEC.md §8.6's Tier B. It deliberately does
 not say this **machine** can perform per-application capture — that is a runtime probe
@@ -91,7 +99,7 @@ All sixteen of §15.1, complete. Every request carries `id`; every response echo
 
 | Command | Params | Result | Notes |
 |---|---|---|---|
-| `hello` | `proto`, `client` | `proto`, `engine`, `session`, `capabilities` | |
+| `hello` | `proto`, `client` | `proto`, `engine`, `version`, `session`, `capabilities` | `version` is the engine binary's own, added in M9.6. |
 | `get_sources` | — | `displays[]`, `windows[]` | Displays carry `stable_id`, which is the identity that survives a reboot or a cable swap. |
 | `get_devices` | — | `render_endpoints[]`, `processes[]` | `eRender` only. Never `eCapture` — microphone capture is a hard non-goal (§0.2). `processes[]` is one `{pid, executable}` per **executable name**, for the settings dialog's Tier B target picker; it is additive and best-effort, so a snapshot that fails leaves the field absent rather than failing the command. |
 | `get_gpu_topology` | — | `adapters[]` | Re-runs §5.1 discovery. |
@@ -104,8 +112,8 @@ All sixteen of §15.1, complete. Every request carries `id`; every response echo
 | `resume_record` | — | `paused`, `paused_total_ms` | §7.5. Idempotent. Forces an IDR. |
 | `get_stats` | — | see below | |
 | `get_health` | — | ladder state (§13) | |
-| `set_log_level` | `level` | `level` | Matched against the logger's own spellings. |
-| `recover` | `sidecar` | `repaired`, `valid`, `output`, `detail` | §10.4's repair path. |
+| `set_log_level` | `level` | `level` | Matched against the logger's own spellings. Changes the **running process** and persists nothing -- `advanced.log_level` is the durable setting. First called by the GUI in M9.6 (Tools ▸ Log level). |
+| `recover` | `sidecar` | `repaired`, `valid`, `output`, `detail` | §10.4's repair path, and **30 s, not 5** -- see Timeouts. The *scan* for sidecars is the GUI's (§10.4 says so); this command repairs one of them. First called by the GUI in M9.6. |
 | `shutdown` | — | `shutting_down` | Answered **before** the teardown starts, so the response reaches the GUI while the pipe is still up. |
 | `get_config` ⁺ | — | the full settings object + `config_path` | Includes `multitrack_available`: whether **this machine** can capture per-application audio (§8.6's runtime probe), which is a different question from the `multitrack` capability flag. |
 | `save_config` ⁺ | any subset | the merged settings | Merges **and** writes `config.toml`. |
@@ -150,6 +158,21 @@ the whole file (§10.3).
 
 `stop_record` is handled with the session lock released, so `get_stats` does not block for
 those 30 s — which is precisely when a GUI most wants to say "finalizing".
+
+**`recover` also gets 30 s, from M9.6 — and §15.1's sentence needs the owner's pen to
+say so.** §15.1 names only `stop_record` because `recover` had no caller when it was
+written; M9.6 Phase 4 gave it one (Tools ▸ Engine ▸ Recover unfinished recordings). The
+command runs `mux::recover`, which on MP4 is *the same lossless remux a clean stop
+performs* — BUG-046 measured ~3.3 s of remux plus ~1 s of validate for a 1.2 GB file. A
+5 s budget would therefore time out on every recording large enough to be worth
+recovering, which is all of them. Implemented as 30 s in `ipc/protocol.py`'s
+`timeout_for`; flagged here rather than silently diverging.
+
+The GUI issues it **asynchronously**, on the same command thread `stop_record` uses and
+for the same reason: a multi-second blocking call on the GUI thread is the freeze M9.6
+Rule B exists to prevent. Recoveries are issued one at a time — the pipe server handles
+one request at a time and the client's backlog is bounded at 8 with a drop-newest policy,
+so firing a directory's worth at once would silently drop the ninth.
 
 ### `get_stats`
 
@@ -233,9 +256,50 @@ Consequences worth knowing:
 ## 5. Events (engine → GUI, unsolicited)
 
 `state_changed`, `stats` (2 Hz), `warning`, `error`, `gpu_migrated`,
-`audio_device_migrated`, `degradation_changed`, `segment_rolled`, `recording_finalized`.
+`audio_device_migrated`, `degradation_changed`, `segment_rolled`, `recording_finalized`,
+`finalize_progress`.
 
 An event carries `event` and never `id` — it answers nothing.
+
+### `finalize_progress` — added in M9.6
+
+SPEC.md §15.1 gives `stop_record` a 30-second timeout "since finalization is legitimately
+slow", and ACCEPTANCE.md's BUG-046 measured how slow: **~3.3 s of remux plus ~1 s of
+validate for a 1.2 GB recording**. This is what happens during those seconds.
+
+```json
+{"event": "finalize_progress",
+ "phase": "flushing|remuxing|validating|swapping|done",
+ "percent": 47,
+ "bytes_done": 601380864, "bytes_total": 1288490188,
+ "output": "D:\\Videos\\FrameCapture\\FrameCapture_2026-09-05_14-22-01.mp4"}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `phase` | Which stage of §10.4's finalization is running. |
+| `percent` | 0–100 across the whole finalization. **Monotonic** — render it directly. |
+| `bytes_done` / `bytes_total` | The remux's read position and the source's size. **Both `0` in every other phase**, which is the signal that the phase has no byte progress and should render as indeterminate rather than as a bar that has stopped. |
+| `output` | The file being finalized, so a GUI that connected mid-stop has a name to show. |
+
+**Emitted while `stop_record` is still in flight.** The engine's request thread handles
+one request at a time, so no *command* is answered during finalization — but
+`PipeServer::send_event` is a write and serialises independently of the read loop, so
+these arrive before the response they precede. A GUI whose event loop is blocked waiting
+on `stop_record` will not see them until it is over, which is why the GUI issues that
+command asynchronously.
+
+**Only `done` reaches 100, and only for a file that passed the validation gate.** A bar at
+100% is the claim that the recording is saved; a file that failed validation is not saved,
+and travels as `recording_finalized` with `"valid": false` instead. A GUI must not treat
+the absence of `done` as success.
+
+**MKV has no `remuxing` phase.** Only MP4 needs §10.3's progressive remux, so an MKV stop
+goes `flushing` → `validating` → `done`. That is a container with no second pass, not a
+progress bar that broke.
+
+Additive under §3's rule: an older GUI does not recognise the name and ignores it, losing
+the progress detail and nothing else — `recording_finalized` still ends the wait.
 
 **Paused is a `state_changed` value, not an event of its own.** §15.1 is explicit, and so
 is the reason: "a paused recording that looks like a running one loses footage silently".

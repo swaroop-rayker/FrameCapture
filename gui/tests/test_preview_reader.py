@@ -207,7 +207,7 @@ def test_the_preview_survives_a_recording_starting_and_stopping(
         assert during is not None, "the preview stopped when the recording started"
         assert during.width() == 960
 
-        assert controller.stop_recording(), "stop_record was refused"
+        assert controller.stop_recording_and_wait(), "stop_record was refused"
         _pump()
 
         after = _wait_for_frame(channel)
