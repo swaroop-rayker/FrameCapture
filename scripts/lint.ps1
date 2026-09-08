@@ -161,9 +161,15 @@ if (-not $SkipTidy) {
         # skipped in silence and the gate reports clean on a shrinking fraction of
         # the tree. This is how 37 findings accumulated behind a green lint run
         # (ENGINEERING_LOG BUG-005), so it is an error, not a warning.
-        $missing = $sources |
+        # `@(...)`, because a pipeline yielding exactly one item yields the *item*, not a
+        # one-element array -- and `$missing.Count` on a bare string is the error that
+        # crashed this branch the first time it fired for real (one new source file). The
+        # stale-database report is the one path here that only ever runs when something is
+        # already wrong, so it is the path least likely to have been exercised and the
+        # worst one to crash in.
+        $missing = @($sources |
             Where-Object { $_.Extension -eq '.cpp' -and $dbFiles -notcontains $_.FullName } |
-            Select-Object -Expand FullName
+            Select-Object -Expand FullName)
         if ($missing) {
             Write-Host 'clang-tidy FAILED: the compile database is stale.' -ForegroundColor Red
             Write-Host "  $($compileDb.FullName)"

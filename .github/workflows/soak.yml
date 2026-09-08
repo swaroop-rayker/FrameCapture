@@ -11,6 +11,7 @@
 # | FC_SUSTAINED_SECONDS    | test_sustained_60fps        | 20      | 600    |
 # | FC_MULTITRACK_SECONDS   | test_multitrack row 14      | 20      | 1800   |
 # | FC_CHAOS_SECONDS        | ChaosTest                   | 30      | 1800   |
+# | FC_SOAK_SECONDS         | SoakTest                    | 120     | 120    |
 #
 # `FC_LOOPBACK_SECONDS` and `FC_SUSTAINED_SECONDS` are real time; `FC_MULTITRACK_SECONDS`
 # runs on a synthetic clock and takes about 376 s of wall time for its 1800.
@@ -66,6 +67,12 @@ jobs:
       # directive and nothing else, and that run produced 262 s of video from a
       # 1800 s recording. BUG-058 is open on the stall behind that.
       FC_CHAOS_SECONDS: '1800'
+      # NOT §20.1's 14400. Four hours inside a job that already runs four other long forms
+      # would push it past `timeout-minutes` and tell you nothing about which one was slow.
+      # The soak tier still runs here at its routine length -- a leak large enough to
+      # matter is visible in two minutes -- and the exit-criterion form is run
+      # deliberately, per TESTING.md.
+      FC_SOAK_SECONDS: '120'
     steps:
       - name: Normalise line endings before checkout
         shell: pwsh

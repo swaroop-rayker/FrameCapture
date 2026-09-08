@@ -25,6 +25,7 @@ which is why the split is a rule rather than an optimisation, and why
 | Python, hardware-free | `pytest gui/tests -m "not engine"` | anywhere |
 | Python, engine-backed | `pytest gui/tests -m engine` | the rig |
 | Chaos | `fc_gpu_tests.exe --gtest_filter=ChaosTest.*` | the rig |
+| Soak | `fc_gpu_tests.exe --gtest_filter=SoakTest.*` | the rig |
 | Everything | `ctest --preset windows-msvc-release --output-on-failure` | the rig |
 
 SPEC.md §21.2 makes the **unfiltered** `ctest` run the contract. The two split forms in
@@ -89,9 +90,36 @@ quick and the exit-criterion form is one variable away.
 | `FC_SUSTAINED_SECONDS` | `test_sustained_60fps` | 20 | `600` (§20 row 6), real time |
 | `FC_MULTITRACK_SECONDS` | `test_multitrack` row 14 | 20 | `1800` synthetic — 376 s wall |
 | `FC_CHAOS_SECONDS` | `ChaosTest` | 30 | `1800` (§20.1's 30 min), real time |
+| `FC_SOAK_SECONDS` | `SoakTest` | 120 | `14400` (§20.1's 4 h), real time |
 
-`soak.yml` sets four of these weekly. **SPEC.md §20.1's four-hour soak is M10's** and is
-not in any workflow; `soak.yml`'s header says where it will go.
+`soak.yml` sets these weekly. **SPEC.md §20.1's four-hour soak form is not scheduled**:
+`FC_SOAK_SECONDS` defaults to 120 there too, because four hours inside a weekly job that
+already runs several long forms would push it past its timeout. Run the exit-criterion form
+deliberately:
+
+```powershell
+$env:FC_SOAK_SECONDS = "14400"
+.\build\windows-msvc-release\bin\fc_gpu_tests.exe --gtest_filter=SoakTest.*
+```
+
+### What the soak tier measures, and what it leaves to others
+
+§20.1 names three soak clauses. **Only the leak clauses are the soak tier's.** Drift is
+`AvSyncTest`'s and already has its own long form (`FC_AV_SYNC_SECONDS=1800`, worst offset
+−187 µs over 1800 marks); re-deriving it would mean decoding four hours of 1080p to answer
+a question a sharper test already answers.
+
+**The growth assertion is on total megabytes, not on an extrapolated rate**, and that is
+deliberate. §20.1's "5 MB/hour" is written for a four-hour run, where it is a 20 MB budget
+that a real leak dwarfs. At the routine 120 s it is 0.17 MB — smaller than the noise. A
+clean 90-second run measured a **0.75 MB** working-set wobble, which becomes "40 MB/hour"
+purely by multiplying by 65, and failed a budget it had not violated. The test now asserts
+`growth < 5 MB/hour × elapsed + 3 MB of jitter allowance`; over four hours the allowance is
+13% of the budget and irrelevant.
+
+Measured on the reference rig at 90 s: working set **250.4 → 250.9 MB**, grew **0.50 MB**
+against a 3.08 MB budget, handles **1586–1587**, 5406 frames captured and encoded, none
+dropped.
 
 **After any change to `AudioTimeline`, run `FC_LOOPBACK_SECONDS=300` before calling it
 done.** BUG-042's first attempt passed lint, both tiers and a 40-second real-endpoint

@@ -155,6 +155,9 @@ add_executable(fc_gpu_tests
     # against anything but the real encode-and-mux chain proves nothing -- the claim is
     # the prime directive, and a mock cannot fail to produce a file the way hardware can.
     chaos/test_chaos_injection.cpp
+    # SPEC.md §20.1's soak tier. On the GPU target for the same reason the chaos tier is:
+    # a leak that only shows over hours is a leak in the real encode-and-mux chain.
+    soak/test_soak.cpp
 )
 
 target_include_directories(fc_gpu_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
@@ -175,7 +178,7 @@ add_dependencies(fc_gpu_tests fc_crash_recorder fc_gui_host fc_audio_target fram
 # pdh.lib is for `test_sustained_60fps` only: SPEC.md §20 row 6 names a GPU *load
 # level*, and the `GPU Engine` performance counters are the only way to report one
 # without a vendor SDK. Test-only -- fc_core links no telemetry (SPEC.md §0.2).
-target_link_libraries(fc_gpu_tests PRIVATE FrameCapture::core fc_synthetic_source GTest::gtest pdh.lib)
+target_link_libraries(fc_gpu_tests PRIVATE FrameCapture::core fc_synthetic_source GTest::gtest pdh.lib psapi.lib)
 
 set_target_properties(fc_gpu_tests PROPERTIES FOLDER "tests")
 

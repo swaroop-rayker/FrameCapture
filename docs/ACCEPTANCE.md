@@ -1587,6 +1587,28 @@ recovery path, and `test_overlay_pill.py` covers the widget's half, but no test 
 engine mid-finalize and watches what the GUI does. That is row 3's territory
 (`CrashRecoveryTest`) from the engine side; the GUI-side pairing is not written.
 
+## SPEC.md §20.1's soak tier
+
+`tests/soak/test_soak.cpp` (gpu). Of §20.1's three soak clauses it owns the two nothing
+else covers — **flat memory and flat handle count** — and leaves drift to `AvSyncTest`,
+which already measures it over 1800 marks.
+
+Measured at 90 s on the reference rig: working set **250.4 → 250.9 MB**, grew **0.50 MB**
+against a 3.08 MB budget, handles **1586–1587**, 5406 frames captured and encoded, none
+dropped, file valid.
+
+**The assertion is on total growth, not on an extrapolated rate**, and the tier's first run
+is why. §20.1's "5 MB/hour" is a four-hour budget of 20 MB; at 120 s it is 0.17 MB, below
+the noise. A clean run's 0.75 MB working-set wobble became "40 MB/hour" by multiplying by
+65 and failed a budget it had not violated. The bound is now
+`5 MB/hour × elapsed + 3 MB`, and the fitted rate is still reported because it is the
+clearest illustration of why it cannot carry the assertion.
+
+**§20.1's four-hour form has not been run.** `FC_SOAK_SECONDS=14400` is one variable away
+and it is M10's exit criterion; what exists today is the mechanism, exercised at 90 s.
+
+---
+
 ## SPEC.md §20.1's chaos tier, and the one injection it does not perform
 
 §20.1 asks for *"randomized injection of `DEVICE_REMOVED`, `ACCESS_LOST`, audio
