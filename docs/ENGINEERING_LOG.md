@@ -15,170 +15,197 @@ graded deliverable, not a nicety.
 
 ---
 
-## [BUG-057] A failed segment rollover makes the engine disown a file it had already finalized
+## [BUG-058] A rebuild that cannot join its encoder thread abandons it, and the recording stalls for 25 minutes
 
-**Severity:** Critical (prime-directive violation — a valid recording is reported to the user as lost)   **Found:** 2026-09-08   **Fixed:** _OPEN — two contributing defects fixed, firing cause not yet identified_   **Commit:** ffb17b7+
+**Severity:** Critical (85% of a recording's content lost; two writers left on one muxer)   **Found:** 2026-09-08   **Fixed:** _OPEN_   **Commit:** _uncommitted_
 
 ### Symptom
 
-The chaos tier's first run at SPEC.md §20.1's specified 30-minute duration failed on its
-only hard assertion — the prime directive itself:
+Found inside BUG-057's 30-minute chaos run, and it is the larger of the two defects that
+run exposed. From the engine log:
+
+```
+08:05:14 rebuilding the capture and device stack cause=access_lost
+08:05:44 ERROR worker thread did not stop within the join timeout; abandoning it
+               thread=fc-venc timeout_ms=30000 error=INTERNAL_THREAD_JOIN_TIMEOUT
+08:05:44 ERROR avcodec_send_frame failed error="End of file" ENCODE_SUBMIT_FAILED   <- the abandoned thread, still running
+...  twenty-five minutes with no log output at all  ...
+08:31:16 ERROR worker thread did not stop within the join timeout; abandoning it thread=fc-capture
+08:31:16 INFO  recording session stopped frames_captured=5919 rebuilds=23
+```
+
+With BUG-057 fixed, the run passes and the cost becomes measurable: a 1800-second
+recording yields a **valid file containing 262 seconds of video**. The prime directive
+holds — the file is playable — but roughly **85% of the content is gone**, and nothing
+told the user while it was happening.
+
+### What is known
+
+1. `VideoPipeline::rebuild_device` joins `fc-venc` with a 30 s timeout and, on timeout,
+   **abandons the thread and carries on**. The abandoned thread keeps running: the log
+   shows it calling `avcodec_send_frame` against a torn-down encoder and failing with
+   `"End of file"` repeatedly.
+2. The capture thread then entered finalization and produced no log output for 25 minutes.
+3. `RecordingSession::stop()` abandoned the capture thread in turn, and its own
+   `pipeline->stop()` was therefore a *second* call into a pipeline whose `running` flag
+   the first call had already taken — which is the `INTERNAL_INVALID_STATE` that BUG-057
+   was about.
+
+So BUG-057 was the *reporting* consequence of this. Fixing it made the loss visible; it
+did not make it smaller.
+
+### Why it is not fixed here
+
+Thread lifetime under a driver that will not return is a design question, not a patch.
+Abandoning a worker that still holds a reference to an encoder and a muxer leaves two
+writers on one output, which is a correctness problem the timeout was presumably chosen to
+avoid being a hang. The options — waiting longer, refusing the rebuild, tearing the session
+down and letting §10.4's recovery own the file — are different products, and the choice
+belongs with the owner.
+
+**Related, and possibly the same root:** the test process itself becomes unreapable after
+~20 device rebuilds — `Get-Process` lists it, `Stop-Process` reports no such process, and
+it holds its binary locked. Exited but stuck in kernel teardown, which points at the
+driver. It will wedge a self-hosted CI runner, and `gpu.yml`'s 90-minute timeout will not
+catch it quickly.
+
+### What would close it
+
+A test that asserts a recording's *duration* survives a burst of rebuilds, not only its
+validity. The chaos tier deliberately asserts only the prime directive (see
+ACCEPTANCE.md); this needs its own case with a content bound, and that case should be red
+until the stall is addressed.
+
+### Lessons
+
+1. **A green prime-directive assertion is a floor, not a report card.** The chaos tier now
+   passes while losing 85% of the recording, exactly as designed — it asserts the file
+   exists and is playable, and says so. Reading "passed" as "healthy" would be the mistake.
+2. **Abandoning a thread is not a recovery.** It converts a hang into a data race and a
+   silent truncation, and the second is harder to notice than the first.
+
+---
+
+## [BUG-057] The engine reported a recording as lost whenever its pipeline could not be stopped
+
+**Severity:** Critical (prime-directive violation — a valid recording reported to the user as lost)   **Found:** 2026-09-08   **Fixed:** 2026-09-08   **Commit:** _uncommitted_
+
+### Symptom
+
+The chaos tier's first run at SPEC.md §20.1's specified 30 minutes failed on its only hard
+assertion — the prime directive itself:
 
 ```
 [ MEASURED ] 322 fault(s) injected over 1800 s
-[ MEASURED ] captured 5689, encoded 6364, queue-dropped 5278, rebuilds 20, migrations recorded 20
-test_chaos_injection.cpp(327): error: Value of: stopped.has_value()
-  Actual: false
-Expected: true
+[ MEASURED ] captured 5689, encoded 6364, queue-dropped 5278, rebuilds 20
 the recording failed rather than degrading: INTERNAL_INVALID_STATE
 ```
 
 `RecordingSession::stop()` returned an error instead of a `ValidationReport`. To every
-caller — including the GUI, which renders it as "Save failed" on the recording pill — the
-recording was lost.
+caller — including the GUI, which renders it as **"Save failed"** on the recording pill —
+the recording was lost. It was not: a valid file with 7893 decodable frames was on disk.
 
-Seed `2991276637`, reproducible with `FC_CHAOS_SEED=2991276637 FC_CHAOS_SECONDS=1800`.
+Seed `2991276637`, reproducible.
 
-### Investigation
+### Root cause
 
-`INTERNAL_INVALID_STATE` has five sites in `recording_session.cpp`. `stop()`'s entry guard
-(`running.exchange(false)`) was ruled out first: `running` is set true in exactly one place
-and false in exactly one place, so a second `stop()` was the only way to reach it, and the
-test calls it once.
+**`stop()` had exactly one way to describe a recording — asking the pipeline — and no
+answer for when the pipeline could not be asked.** Two states reach that, and the run hit
+the second:
 
-That left `stop()`'s *second* guard, at line 859:
+1. **No pipeline at all.** A migration-triggered rollover finalizes the current file,
+   releases its pipeline, and fails to open the next. The `ValidationReport` from that
+   finalize was examined for failure and otherwise **discarded**, two lines before the code
+   that needed it.
+2. **A pipeline that refuses a second stop** — what actually fired. `rebuild_device`
+   could not join `fc-venc` within 30 s, abandoned it, and the capture thread then sat
+   inside the rollover's own `pipeline->stop()` for **25 minutes**. When the caller asked
+   the session to stop, it abandoned the capture thread in turn and called
+   `pipeline->stop()` again — and `VideoPipeline::stop()` refuses a second call, because
+   the first had already taken its `running` flag.
 
-```cpp
-if (!impl_->pipeline) {
-    if (impl_->settings.preview_only) { /* ...a report, not an error... */ }
-    return FcError::INTERNAL_INVALID_STATE;
-}
-```
+Either way the file was on disk and the engine had nothing to say about it.
 
-So the session reached `stop()` with **no pipeline**. One path leaves it that way — the
-migration-triggered segment rollover, when the rebuilt encoder's parameter sets differ:
+### The diagnosis was wrong twice, and why
 
-```cpp
-if (const Result<mux::ValidationReport> report = pipeline->stop(); !report.has_value()) { /* log */ }
-pipeline.reset();                                   // (2) pipeline is now null
+Recorded because the reason is reusable. The rollover's log line read **"the rebuilt
+encoder's parameter sets differ; closing this file and opening the next"** — printed
+unconditionally, while the rollover fires on *any* rebuild failure. The actual error was
+`INTERNAL_THREAD_JOIN_TIMEOUT`, and `reason=` in the same line's fields said so. The
+sentence contradicted its own evidence, and two thirty-minute runs were spent proving a
+rollover theory that the migration records then refuted outright: all 23 records read
+`same_file 1, failed 0`, so the rollover path was never even entered on the counted
+rebuilds.
 
-++segment_index;
-if (const Result<void> opened = open_pipeline(next); !opened.has_value()) {
-    FC_LOG_ERROR(..., "opening the next segment failed; the recording stops", ...);
-    stop_requested.store(true, std::memory_order_release);
-    return;                                         // (3) returns with pipeline still null
-}
-```
+The message now states what happened rather than what is assumed to have happened.
 
-Under 20 rebuilds against a disk stalling 300 ms every eighth write, `open_pipeline` failed
-once. From that moment the session had no pipeline, and `stop()` could only report an
-internal error.
-
-### What is proven
-
-Established by reading the code and confirmed by a second full-length run. These are
-facts, not the hypothesis below:
-
-1. **`pipeline == nullptr` at `stop()` has exactly one source.** `pipeline.reset()` appears
-   once in `recording_session.cpp` — in the migration-triggered segment rollover. So the
-   session reached `stop()` having rolled over and failed to open the next segment.
-2. **`VideoPipeline` never clears its own `running` flag.** Only its `stop()` does, so the
-   pipeline had not stopped itself before the rollover asked it to.
-3. **The routine 30 s form passes and the 1800 s form fails**, reproducibly, at seed
-   `2991276637`. The defect needs ~20 rebuilds; 30 seconds reaches three.
-
-### What was fixed, and why it was not enough
-
-Two real defects were found and corrected on the way. Neither is the one that fires.
-
-**`open_pipeline` installed a pipeline before starting it:**
-
-```cpp
-pipeline = std::make_unique<VideoPipeline>();   // installed as the live pipeline
-FC_TRY(pipeline->start(...));                   // ...then started
-```
-
-A failed start left a half-constructed pipeline installed as the live one — non-null, so
-every `if (pipeline)` in the file reads it as working, and unstarted, so
-`VideoPipeline::stop()` refuses it with `INTERNAL_INVALID_STATE`. Fixed: built into a local
-and installed only on success.
-
-**The rollover's `ValidationReport` was discarded.** The rollover finalizes and validates
-the current file, and that report was examined for failure and otherwise dropped. `Impl`
-now retains it in `last_report`, and `stop()` returns it when the pipeline is gone but a
-file was written.
-
-**The re-run at the same seed failed identically.** Same error, same 20 rebuilds, same
-counters. So neither defect above is the live cause.
-
-### The remaining hypothesis — NOT yet evidenced
-
-By elimination: `last_report` is only set when the rollover's `pipeline->stop()` *succeeds*.
-If that finalize returns an error — plausible with the device lost and the disk stalling
-300 ms every eighth write — the report is never retained, and `stop()` falls through to the
-same `INTERNAL_INVALID_STATE`.
-
-**This is a hypothesis and it is recorded as one.** Two earlier accounts of this bug read as
-confident and were wrong; the difference between the two above and this one is that this one
-has not been checked against evidence.
-
-### Why it was not checked
-
-The engine's own log was deleted before it could be read. The chaos fixture logged into its
-`TempDir`, and `TearDownTestSuite` removes that — so the run that failed took its own
-explanation with it, twice.
-
-Fixed for next time, and this is the durable lesson of the entry so far:
-
-- the chaos log now goes to `%TEMP%\framecapture-chaos-logs` and **survives the test**;
-- every `MigrationRecord` is printed — cause, `same_file`, `failed`, gap, output — so the
-  aggregate "20 rebuilds" becomes "which one rolled over, and what happened to it".
-
-A failure that costs thirty minutes to reproduce must leave its evidence behind. That should
-have been true before the first run, not after the second.
+The other reason it took three attempts: the first two failures **deleted the engine log**
+with the fixture's `TempDir` before it could be read. The log now survives at
+`%TEMP%\framecapture-chaos-logs` and every `MigrationRecord` is printed. Every step of the
+successful diagnosis came from that.
 
 ### Fix
 
-**Open.** Two contributing defects fixed (above); the firing cause is not yet identified.
-The next step is one instrumented run at seed `2991276637`, which will produce the finalize
-error and the open error rather than another hypothesis.
+`RecordingSession::Impl::report_for_abandoned_recording(FcError fallback)`, used by **both**
+failing paths in `stop()`: retained report from the last successful finalize, failing that
+a validation of whatever is on disk, and the error only when nothing was ever written.
+`INTERNAL_INVALID_STATE` is now reserved for a session that genuinely produced no file.
 
-The contract question from the original entry stands and is the owner's: **what should
-`stop()` report after a rollover?** It reports on the current pipeline only. With segments
-the honest answer is the last segment's report plus the existence of earlier ones — and the
-migration path writes no `.segments.json` sidecar, unlike planned segmentation (§11).
+Two contributing defects fixed on the way:
 
-### An unexplained observation, recorded rather than pursued
+- **`open_pipeline` installed the pipeline before starting it**, so a failed start left a
+  half-constructed pipeline installed as the live one — non-null, so every `if (pipeline)`
+  read it as working, and unstarted, so `VideoPipeline::stop()` refused it. Now built into
+  a local and installed only on success.
+- **The rollover's `ValidationReport` is retained** rather than discarded.
 
-After the first failure the test process **printed its verdict and never exited**. It sat
-for half an hour; `Get-Process` listed it, `Stop-Process` reported no such process, and it
-held `fc_gpu_tests.exe` locked so the next link failed. Exited but unreapable — a thread
-stuck in a kernel call, which after 20 GPU device rebuilds under load points at the driver
-rather than at this code.
+Plus a diagnostic on `stop()`'s first guard naming which of its refusals fired.
 
-Not investigated. It matters operationally: a chaos run that hangs on exit will wedge a CI
-runner, and `gpu.yml` has a 90-minute timeout that would not catch it quickly.
+### Regression tests
 
-### Regression test
+**`ChaosTest.ARolloverThatCannotOpenTheNextSegmentStillReportsTheFileItWrote`** (gpu) covers
+path 1 deterministically in **4.1 s**: force the rebuild onto the adapter that owns no
+display output — a guaranteed parameter-set mismatch — with a **directory** pre-created at
+the next segment's path so the reopen cannot succeed on any filesystem. Measured
+`same_file 0, failed 1`, and `stop()` reports **valid 1, 122 frames**. Verified in both
+directions: reverted, it fails with the original error.
 
-`ChaosTest.RandomisedFaultInjectionAlwaysYieldsAValidFile` at
-`FC_CHAOS_SECONDS=1800`, seed `2991276637`. It is the test that found it, it fails on the
-defect today, and it is the test that must go green.
+**Path 2 has no fast test**, and that is stated rather than implied. It needs an encoder
+thread that will not join, which no seam produces on demand. It is covered by the
+30-minute chaos run at seed `2991276637`, which now passes:
 
-**The routine 30-second form passes**, which is exactly why this needed the spec's stated
-duration to surface: 20 rebuilds is where it lives, and a 30-second run reaches three.
+```
+21 rebuilds, captured 7428, queue-dropped 7001
+file: valid 1, 7893 frames decoded, 262.133 s of video
+the pipeline could not be stopped; falling back to what is on disk  error=INTERNAL_INVALID_STATE
+the recording ended abnormally; reporting what is on disk  valid=true decoded_frames=7893
+```
+
+An earlier fix carrying only the retained-report half passed the deterministic case and
+**still failed the 30-minute run**, which is how the two paths were told apart.
+
+### What this fix does not do
+
+**262 seconds of video out of a 1800-second recording.** The file is valid and the caller
+is told about it, which is the prime directive and is what this bug was. It is not a
+healthy recording: ~85% of the content was lost to the stall behind path 2. That is
+**BUG-058**, open, and reading this row as "the chaos tier is green so the engine is well"
+would be exactly the wrong conclusion.
 
 ### Lessons
 
-1. **The chaos tier justified itself on its first full-length run.** Every fault here has a
-   deterministic single-fault test and every one of those is green. What none of them
-   reaches is the twentieth rebuild, and that is where the pipeline stops being able to
-   report.
-2. **Run the duration the spec states, not the duration that is convenient.** The routine
-   form is for iterating. It passed while a critical defect sat behind it.
-3. **A successful result that is discarded is a failure waiting to be reported.** The
-   `ValidationReport` from the finalized segment existed, was correct, and was thrown away
-   two lines before the code path that needed it.
+1. **A log line must not assert a cause it has not checked.** This one named a
+   parameter-set mismatch for a thread-join timeout while carrying the real error in its
+   own fields, and it cost two thirty-minute runs and two wrong write-ups.
+2. **Keep the evidence.** Three hypotheses were produced by reasoning; the correct one came
+   from a log file, the first time one survived. A failure costing thirty minutes to
+   reproduce must leave its evidence behind — and that must be true before the first run,
+   not after the second.
+3. **A successful result that is discarded is a failure waiting to be reported.**
+4. **`Copy-Item` preserves the source timestamp**, so restoring a file after a revert check
+   left MSBuild skipping the rebuild. Two runs were made against a stale binary and briefly
+   read as "the fix does not work". After any restore, touch the file before trusting an
+   incremental build.
 
 ---
 

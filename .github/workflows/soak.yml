@@ -61,14 +61,10 @@ jobs:
       # SPEC.md §20.1 specifies the chaos tier as a 30-minute run. The routine 30 s form
       # proves the mechanism; this is the duration the spec asks for.
       #
-      # *** THIS JOB IS EXPECTED TO FAIL until BUG-057 is closed. ***
-      #
-      # The 30-minute form reproducibly fails at seed 2991276637 with
-      # `stop()` -> INTERNAL_INVALID_STATE after ~20 rebuilds: a segment rollover whose
-      # next segment could not be opened, leaving the engine unable to report a recording
-      # it had already finalized. It is red because a critical open defect should be red,
-      # not because the workflow is broken -- see ENGINEERING_LOG.md BUG-057 before
-      # spending time on it.
+      # Green as of 2026-09-08 (BUG-057 fixed): 21 rebuilds, a valid file with 7893
+      # decoded frames. Note what "green" means here -- the tier asserts the prime
+      # directive and nothing else, and that run produced 262 s of video from a
+      # 1800 s recording. BUG-058 is open on the stall behind that.
       FC_CHAOS_SECONDS: '1800'
     steps:
       - name: Normalise line endings before checkout

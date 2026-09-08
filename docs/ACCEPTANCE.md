@@ -1653,26 +1653,24 @@ Fixed with a range-checked `strtoull`, and verified by running the same seed twi
 comparing the schedules rather than by reading the code. See BUG-056; the lesson generalises
 past this file.
 
-### Status: the 30-minute form FAILS on an open defect
+### Status: green at both durations, and what that does and does not mean
 
-**Read this before quoting the numbers below.** SPEC.md §20.1 specifies a 30-minute run.
-At that duration the tier **fails, reproducibly**, at seed `2991276637`:
-`RecordingSession::stop()` returns `INTERNAL_INVALID_STATE` after ~20 rebuilds — a segment
-rollover whose next segment could not be opened, leaving the engine unable to report a
-recording it had already finalized.
+SPEC.md §20.1's 30-minute form passes as of 2026-09-08, at seed `2991276637`:
 
-That is **BUG-057, critical and open**, and it is a genuine prime-directive violation found
-by this tier on its first full-length run. The tier is doing its job; the engine is not
-passing it.
+```
+21 rebuilds, captured 7428, queue-dropped 7001
+file: valid 1, 7893 frames decoded, 262.133 s of video
+```
 
-So the tier's own status is honest only stated in two halves:
+**Read the last number before quoting this row as healthy.** That is 262 seconds of video
+out of a 1800-second recording. The file is valid and the caller is told about it, which is
+the prime directive and is all this tier asserts. Roughly 85% of the content was lost to a
+capture-thread stall behind a rebuild that could not join its encoder thread — **BUG-058,
+open**. A tier that asserts a floor reports the floor being met, not the room above it.
 
-| Form | Status |
-|---|---|
-| Routine, 30 s (what `ctest` runs) | **Green** |
-| §20.1's 30 min (what the spec asks for) | **Red — BUG-057** |
-
-`soak.yml` runs the 30-minute form weekly and is expected to be red until BUG-057 closes.
+The tier found BUG-057 on its first full-length run: a prime-directive violation in which
+the engine reported a valid recording as lost whenever its pipeline could not be stopped.
+That is fixed, and this run is its regression coverage.
 
 ### Measured
 

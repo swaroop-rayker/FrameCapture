@@ -67,6 +67,7 @@
 #include "core/capture/source_resolver.h"
 #include "core/gpu/gpu_topology.h"
 #include "core/logging/logger.h"
+#include "core/mux/segment_planner.h"
 #include "core/pipeline/recording_session.h"
 
 #include "decoded_media.h"
@@ -382,6 +383,95 @@ TEST_F(ChaosTest, RandomisedFaultInjectionAlwaysYieldsAValidFile) {
     EXPECT_GT(stats.pipeline.frames_queue_dropped, 0u)
         << "the injected disk stall never saturated a queue, so this run did not exercise "
            "§20.1's queue-saturation injection";
+}
+
+// ---------------------------------------------------------------------------
+// BUG-057's regression case, deterministic and in seconds
+// ---------------------------------------------------------------------------
+//
+// The chaos run above found this, and it cost thirty minutes and twenty rebuilds to do
+// it. What it found is reachable directly, because the state is simple to describe: a
+// segment rollover whose next segment cannot be opened.
+//
+// **How the rollover is forced.** `VideoPipeline::rebuild_device` documents its own
+// contract: "a failure leaves the pipeline without an encoder -- so the caller's contract
+// is that a refusal means 'close the segment and open the next', never 'carry on'." So
+// *any* rebuild failure rolls the segment, and forcing the rebuild onto the other adapter
+// makes the parameter sets differ, which is the refusal §5.4 was amended to describe.
+//
+// **How the next open is made to fail.** A directory is created at exactly the path the
+// next segment would take. Opening a file there cannot succeed, on any filesystem, for a
+// reason that has nothing to do with timing -- where the chaos run reached the same state
+// through a device that had genuinely gone away.
+//
+// What must hold afterwards is the prime directive, and nothing else: the recording that
+// was written before the rollover is reported to the caller. Not "no error"; a *report*,
+// with a path, so the caller can tell the user where their file is.
+
+TEST_F(ChaosTest, ARolloverThatCannotOpenTheNextSegmentStillReportsTheFileItWrote) {
+    // The adapter that owns no display output. SPEC.md §5.2 selects the one that *does*
+    // -- that is the whole point of §5.1's adapter-output matching -- so forcing this one
+    // is a cross-adapter move by construction, without needing to ask the session which
+    // adapter it picked.
+    const fc::gpu::AdapterInfo* other = nullptr;
+    for (const fc::gpu::AdapterInfo& adapter : topology_->topology().adapters) {
+        if (adapter.adapter_class != fc::gpu::AdapterClass::Software && adapter.can_encode() &&
+            adapter.outputs.empty()) {
+            other = &adapter;
+            break;
+        }
+    }
+    if (other == nullptr) {
+        GTEST_SKIP() << "needs a second encoding adapter that owns no display output";
+    }
+
+    SessionSettings settings = settings_for("rollover");
+    ASSERT_NE(settings.target.monitor, 0u) << "no primary display to resolve an adapter from";
+    // No disk stall here. This case is about the rollover, and a stall would only make it
+    // slower and less certain.
+    settings.injected_stall_ns = 0;
+
+    RecordingSession session;
+    const fc::Result<void> started = session.start(settings);
+    ASSERT_TRUE(started.has_value()) << fc::error_name(started.error());
+
+    // The path the rollover will reach for, blocked by a directory of the same name.
+    const std::filesystem::path blocked = fc::mux::segment_path(settings.output, 2);
+    std::filesystem::create_directories(blocked);
+    ASSERT_TRUE(std::filesystem::is_directory(blocked));
+
+    std::this_thread::sleep_for(std::chrono::seconds{2});
+
+    // Force the rebuild onto the other adapter, so the replacement encoder's parameter
+    // sets cannot match the ones the container already committed to.
+    session.force_next_adapter(other->id);
+    session.inject_device_error(kDeviceRemoved);
+
+    for (int i = 0; i < 150 && session.migrations().empty(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
+    std::this_thread::sleep_for(std::chrono::seconds{1});
+
+    const std::vector<MigrationRecord> migrations = session.migrations();
+    const fc::Result<fc::mux::ValidationReport> stopped = session.stop();
+
+    ASSERT_FALSE(migrations.empty()) << "the forced migration never happened, so this case proved nothing";
+    std::cout << "[ MEASURED ] forced cross-adapter rollover onto a blocked path: same_file "
+              << migrations.front().same_file << ", failed " << migrations.front().failed << "\n"
+              << std::flush;
+
+    // The assertion BUG-057 is about. Before the fix this is `INTERNAL_INVALID_STATE`:
+    // the engine had written a file, finalized it, and could not say so.
+    ASSERT_TRUE(stopped.has_value()) << "a recording was written and the engine reported no file at all: "
+                                     << fc::error_name(stopped.error());
+
+    std::cout << "[ MEASURED ] stop() reported: valid " << stopped.value().valid << ", "
+              << stopped.value().decoded_frames << " frames decoded, detail \"" << stopped.value().detail << "\"\n"
+              << std::flush;
+
+    // The file itself, independently of what the report claims about it.
+    EXPECT_TRUE(std::filesystem::exists(settings.output))
+        << "the first segment is not on disk: " << settings.output.string();
 }
 
 } // namespace

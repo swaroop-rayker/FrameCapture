@@ -54,10 +54,12 @@ replay works after any change to `seed_from_env`** — BUG-056 was that reader s
 truncating every seed above 2147483647, which is half of them, while printing an
 instruction that did not work.
 
-**The 30-minute form currently fails on BUG-057**, a critical open defect this tier
-found: after ~20 rebuilds a segment rollover leaves the engine unable to report a recording
-it had already finalized. The routine 30-second form passes, which is why `ctest` is green
-and `soak.yml` is not. Read the log entry before investigating a red soak run.
+**Both durations pass as of 2026-09-08.** The 30-minute form found BUG-057 — the engine
+reporting a valid recording as lost whenever its pipeline could not be stopped — and now
+covers the fix. Note what a green run means: the tier asserts the prime directive and
+nothing else, and the passing run produced **262 s of video from a 1800 s recording**.
+BUG-058 is open on the stall behind that, so do not read a green chaos run as a healthy
+engine.
 
 The run also fails if it injected nothing, or if the disk stall caused no queue drops.
 Both guards exist because both states have happened: a schedule that drew no faults, and a

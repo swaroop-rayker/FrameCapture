@@ -213,6 +213,16 @@ struct RecordingSession::Impl {
     [[nodiscard]] Result<gpu::EncoderSelection> select();
 
     [[nodiscard]] Result<void> open_pipeline(const std::filesystem::path& output);
+
+    /// What to tell the caller when the pipeline could not report for itself (BUG-057).
+    ///
+    /// Used by both failing paths in `stop()`: no pipeline at all after a rollover whose
+    /// next segment would not open, and a pipeline that refuses a second `stop()` because
+    /// the capture thread was abandoned mid-finalization. In both a file is usually on
+    /// disk -- §10.3's fragmented MP4 and Matroska are playable to their last complete
+    /// cluster -- and answering an error code would tell the user their recording does
+    /// not exist. `fallback` is the error to report if there turns out to be no file.
+    [[nodiscard]] Result<mux::ValidationReport> report_for_abandoned_recording(FcError fallback);
     [[nodiscard]] Result<void> open_capture();
 
     /// Starts the preview stage on the current device, if one was asked for.
@@ -249,6 +259,42 @@ Result<gpu::EncoderSelection> RecordingSession::Impl::select() {
         return FcError::GPU_NO_SUITABLE_ADAPTER;
     }
     return topology.select_for_monitor(settings.target.monitor);
+}
+
+Result<mux::ValidationReport> RecordingSession::Impl::report_for_abandoned_recording(FcError fallback) {
+    if (last_report.has_value()) {
+        FC_LOG_WARN(Subsystem::App, "reporting the last finalized file",
+                    LogFields{}
+                        .add("output", current_output.string())
+                        .add("valid", last_report->valid)
+                        .add("decoded_frames", last_report->decoded_frames)
+                        .add("segments", static_cast<std::int64_t>(segment_index)));
+        return *last_report;
+    }
+
+    // No retained report. Ask the file what it is: the same question §10.4's recovery
+    // path asks, and an honest `valid: false` with a path beats an error code with
+    // neither -- the path is what the caller hands to recovery.
+    if (!current_output.empty() && std::filesystem::exists(current_output)) {
+        if (const Result<mux::ValidationReport> probed =
+                mux::Muxer::validate(current_output, mux::ValidationExpectation{});
+            probed.has_value()) {
+            FC_LOG_WARN(Subsystem::App, "the recording ended abnormally; reporting what is on disk",
+                        LogFields{}
+                            .add("output", current_output.string())
+                            .add("valid", probed.value().valid)
+                            .add("decoded_frames", probed.value().decoded_frames));
+            return probed.value();
+        }
+        mux::ValidationReport report;
+        report.valid = false;
+        report.detail = "the recording ended abnormally and the file could not be validated";
+        FC_LOG_ERROR(Subsystem::Mux, "the recording ended abnormally and the file will not validate",
+                     LogFields{}.add("output", current_output.string()).add_error(fallback));
+        return report;
+    }
+
+    return fallback;
 }
 
 Result<void> RecordingSession::Impl::open_pipeline(const std::filesystem::path& output) {
@@ -462,8 +508,13 @@ void RecordingSession::Impl::rebuild(RebuildCause cause) {
         record.same_file = true;
         record.output = current_output;
     } else {
-        FC_LOG_WARN(Subsystem::Mux,
-                    "the rebuilt encoder's parameter sets differ; closing this file and opening the next",
+        // Says what happened, not what is assumed to have happened. This line used to
+        // read "the rebuilt encoder's parameter sets differ" unconditionally, and the
+        // rollover fires on *any* rebuild failure -- so a
+        // `INTERNAL_THREAD_JOIN_TIMEOUT` was reported as a parameter-set mismatch. That
+        // sent BUG-057's diagnosis down the wrong path twice, across two thirty-minute
+        // runs. `reason` was always in the fields; the sentence contradicted it.
+        FC_LOG_WARN(Subsystem::Mux, "the rebuild failed; closing this file and opening the next",
                     LogFields{}
                         .add("from", record.from.to_string())
                         .add("to", target.to_string())
@@ -854,6 +905,14 @@ Result<void> RecordingSession::start(const SessionSettings& settings) {
 
 Result<mux::ValidationReport> RecordingSession::stop() {
     if (!impl_->running.exchange(false)) {
+        // Says *which* refusal this is. `INTERNAL_INVALID_STATE` comes out of four places
+        // in this function, and during BUG-057 the difference between "already stopped"
+        // and "stopped with no pipeline" cost two thirty-minute runs to tell apart.
+        FC_LOG_WARN(Subsystem::App, "stop() called on a session that was not running",
+                    LogFields{}
+                        .add("output", impl_->current_output.string())
+                        .add("has_pipeline", impl_->pipeline != nullptr)
+                        .add("has_last_report", impl_->last_report.has_value()));
         return FcError::INTERNAL_INVALID_STATE;
     }
 
@@ -893,23 +952,34 @@ Result<mux::ValidationReport> RecordingSession::stop() {
                             .add("preview_published", static_cast<std::int64_t>(impl_->retired_preview.published)));
             return report;
         }
-        if (impl_->last_report.has_value()) {
-            // A file was written, finalized and validated before the pipeline was
-            // released -- a segment rollover whose *next* segment could not be opened
-            // (BUG-057). The recording ended earlier than the caller asked, which is
-            // what `stop_requested` and the failed `MigrationRecord` say; what it did
-            // not do is cease to exist.
-            FC_LOG_WARN(Subsystem::App, "the session ended before stop was called; reporting the last finalized file",
-                        LogFields{}
-                            .add("output", impl_->settings.output.string())
-                            .add("valid", impl_->last_report->valid)
-                            .add("decoded_frames", impl_->last_report->decoded_frames)
-                            .add("segments", static_cast<std::int64_t>(impl_->segment_index)));
-            return *impl_->last_report;
-        }
-        return FcError::INTERNAL_INVALID_STATE;
+        // BUG-057. A segment rollover whose *next* segment could not be opened leaves
+        // the session with no pipeline, and there is still a file: the previous segment
+        // was finalized on the way through. Answering an error here tells the caller the
+        // recording does not exist, and the GUI renders that as "Save failed" over a file
+        // the user could have played.
+        return impl_->report_for_abandoned_recording(FcError::INTERNAL_INVALID_STATE);
     }
-    const Result<mux::ValidationReport> report = impl_->pipeline->stop();
+    Result<mux::ValidationReport> report = impl_->pipeline->stop();
+
+    // BUG-057. `stop()` can be the *second* call into this pipeline: the capture thread
+    // may be inside the rollover's own `pipeline->stop()` when the caller asks to stop,
+    // and the join above abandons it after `kFinalizeJoinTimeout` rather than waiting
+    // forever. `VideoPipeline::stop()` then refuses -- its `running` flag was already
+    // taken by the in-flight call -- and the caller would be told the recording does not
+    // exist.
+    //
+    // Measured: a 30-minute chaos run where `rebuild_device` failed with
+    // INTERNAL_THREAD_JOIN_TIMEOUT (the venc thread would not stop in 30 s), leaving the
+    // capture thread stuck in finalization for 25 minutes. The file was on disk
+    // throughout.
+    //
+    // So the fallback belongs on *any* failing stop, not only on the no-pipeline path:
+    // whatever went wrong, if there is a file the caller must be told about it.
+    if (!report.has_value()) {
+        FC_LOG_WARN(Subsystem::Mux, "the pipeline could not be stopped; falling back to what is on disk",
+                    LogFields{}.add("output", impl_->current_output.string()).add_error(report.error()));
+        report = impl_->report_for_abandoned_recording(report.error());
+    }
 
     FC_LOG_INFO(Subsystem::App, "recording session stopped",
                 LogFields{}
