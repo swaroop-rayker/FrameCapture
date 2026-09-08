@@ -24,10 +24,45 @@ which is why the split is a rule rather than an optimisation, and why
 | GPU, one process | `build\windows-msvc-release\bin\fc_gpu_tests.exe` | the rig |
 | Python, hardware-free | `pytest gui/tests -m "not engine"` | anywhere |
 | Python, engine-backed | `pytest gui/tests -m engine` | the rig |
+| Chaos | `fc_gpu_tests.exe --gtest_filter=ChaosTest.*` | the rig |
 | Everything | `ctest --preset windows-msvc-release --output-on-failure` | the rig |
 
 SPEC.md §21.2 makes the **unfiltered** `ctest` run the contract. The two split forms in
 CLAUDE.md §3 are the same thing divided, for iterating.
+
+### The chaos tier (SPEC.md §20.1)
+
+Randomised fault injection against the real chain, asserting the one thing that must hold
+however the faults land: **a valid, playable file comes out** (CLAUDE.md §1).
+
+Every other test in the suite injects one fault from a healthy state. This one injects
+several, in an order nobody chose, while the disk is already stalling — including
+`DEVICE_REMOVED` and `ACCESS_LOST` back to back, so the second arrives during the recovery
+from the first. Those are states no single-fault test visits and the ones a genuinely
+failing machine produces.
+
+**The seed is printed on every run, passing or failing**, and `FC_CHAOS_SEED` replays it:
+
+```powershell
+$env:FC_CHAOS_SEED = "3130200536"   # the number the failing run printed
+$env:FC_CHAOS_SECONDS = "1800"      # §20.1's 30-minute form
+.\build\windows-msvc-release\bin\fc_gpu_tests.exe --gtest_filter=ChaosTest.*
+```
+
+A randomised test whose failure cannot be replayed is an anecdote, so **check that the
+replay works after any change to `seed_from_env`** — BUG-056 was that reader silently
+truncating every seed above 2147483647, which is half of them, while printing an
+instruction that did not work.
+
+**The 30-minute form currently fails on BUG-057**, a critical open defect this tier
+found: after ~20 rebuilds a segment rollover leaves the engine unable to report a recording
+it had already finalized. The routine 30-second form passes, which is why `ctest` is green
+and `soak.yml` is not. Read the log entry before investigating a red soak run.
+
+The run also fails if it injected nothing, or if the disk stall caused no queue drops.
+Both guards exist because both states have happened: a schedule that drew no faults, and a
+stall mild enough that §20.1's "queue saturation" was named in the header and absent from
+the run.
 
 ### Run the GPU tier in both forms
 
@@ -51,6 +86,7 @@ quick and the exit-criterion form is one variable away.
 | `FC_AUDIO_DRIFT_MINUTES` | `AudioPathTest` drift run | 30 | — |
 | `FC_SUSTAINED_SECONDS` | `test_sustained_60fps` | 20 | `600` (§20 row 6), real time |
 | `FC_MULTITRACK_SECONDS` | `test_multitrack` row 14 | 20 | `1800` synthetic — 376 s wall |
+| `FC_CHAOS_SECONDS` | `ChaosTest` | 30 | `1800` (§20.1's 30 min), real time |
 
 `soak.yml` sets four of these weekly. **SPEC.md §20.1's four-hour soak is M10's** and is
 not in any workflow; `soak.yml`'s header says where it will go.

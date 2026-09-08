@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -104,6 +105,20 @@ struct RecordingSession::Impl {
     /// `stop_preview`, or by the stop -- so `stats()` reports the session's whole preview
     /// history rather than the current writer's slice of it. Guarded by `preview_mutex`.
     preview::PreviewWriterStats retired_preview;
+
+    /// The report from the most recently finalized file, kept so `stop()` can still say
+    /// a recording exists after the pipeline that wrote it has been released (BUG-057).
+    ///
+    /// A segment rollover finalizes and validates the current file and then lets its
+    /// pipeline go. Until this existed that report was computed, found good, and dropped
+    /// — so if the *next* segment then failed to open, `stop()` had no pipeline to ask
+    /// and answered `INTERNAL_INVALID_STATE`. The file was on disk, complete and valid,
+    /// and the engine reported it as a failed recording. CLAUDE.md §1 is not only about
+    /// writing the file; a file the caller is told does not exist is a file the user has
+    /// lost.
+    ///
+    /// Capture thread writes it, `stop()` reads it after that thread has been joined.
+    std::optional<mux::ValidationReport> last_report;
 
     /// The encoder the current pipeline was opened with. A rebuild must reproduce it
     /// exactly for the same-adapter path to keep one file.
@@ -248,8 +263,18 @@ Result<void> RecordingSession::Impl::open_pipeline(const std::filesystem::path& 
     pipeline_settings.injected_stall_period = settings.injected_stall_period;
     pipeline_settings.on_finalize_progress = settings.on_finalize_progress;
 
-    pipeline = std::make_unique<VideoPipeline>();
-    FC_TRY(pipeline->start(device->device(), pipeline_settings));
+    // Built into a local and installed only once it has started (BUG-057).
+    //
+    // Assigning the member first and starting it afterwards leaves a *half-constructed
+    // pipeline installed as the live one* when the start fails: non-null, so every
+    // `if (pipeline)` in this file reads it as working, and unstarted, so
+    // `VideoPipeline::stop()` refuses it with `INTERNAL_INVALID_STATE`. That is how a
+    // recording that had already been finalized came to be reported as a failure -- the
+    // caller was told the session was in a bad state by an object that had never run.
+    auto opening = std::make_unique<VideoPipeline>();
+    FC_TRY(opening->start(device->device(), pipeline_settings));
+
+    pipeline = std::move(opening);
     // From the pipeline, not from `output`: with SPEC.md §11 segmentation on, the file it
     // actually opened is `<basename>_part001`, and reporting the base would name a file
     // that does not exist (BUG-043's lesson).
@@ -446,7 +471,14 @@ void RecordingSession::Impl::rebuild(RebuildCause cause) {
 
         // The prime directive: the file written so far is finalized and validated
         // before anything else happens. A migration must never cost the recording.
-        if (const Result<mux::ValidationReport> report = pipeline->stop(); !report.has_value()) {
+        //
+        // **The report is kept** (BUG-057). It used to be examined for failure and
+        // otherwise discarded, which left `stop()` with nothing to return if the next
+        // segment then failed to open -- a finalized, valid recording reported as an
+        // internal error.
+        if (const Result<mux::ValidationReport> report = pipeline->stop(); report.has_value()) {
+            last_report = report.value();
+        } else {
             FC_LOG_ERROR(Subsystem::Mux, "finalizing the previous segment failed",
                          LogFields{}.add_error(report.error()));
         }
@@ -455,6 +487,11 @@ void RecordingSession::Impl::rebuild(RebuildCause cause) {
         ++segment_index;
         const std::filesystem::path next = mux::segment_path(settings.output, segment_index);
         if (const Result<void> opened = open_pipeline(next); !opened.has_value()) {
+            // The recording stops here, and that is a legitimate outcome -- the adapter
+            // this session was encoding on is gone and the replacement will not open.
+            // What must not also happen is the *previous* segment being disowned: it was
+            // finalized and validated three lines up, and `last_report` is what lets
+            // `stop()` hand it to the caller instead of an error code.
             FC_LOG_ERROR(Subsystem::Mux, "opening the next segment failed; the recording stops",
                          LogFields{}.add_error(opened.error()));
             record.failed = true;
@@ -855,6 +892,20 @@ Result<mux::ValidationReport> RecordingSession::stop() {
                             .add("frames_captured", static_cast<std::int64_t>(impl_->frames_captured.load()))
                             .add("preview_published", static_cast<std::int64_t>(impl_->retired_preview.published)));
             return report;
+        }
+        if (impl_->last_report.has_value()) {
+            // A file was written, finalized and validated before the pipeline was
+            // released -- a segment rollover whose *next* segment could not be opened
+            // (BUG-057). The recording ended earlier than the caller asked, which is
+            // what `stop_requested` and the failed `MigrationRecord` say; what it did
+            // not do is cease to exist.
+            FC_LOG_WARN(Subsystem::App, "the session ended before stop was called; reporting the last finalized file",
+                        LogFields{}
+                            .add("output", impl_->settings.output.string())
+                            .add("valid", impl_->last_report->valid)
+                            .add("decoded_frames", impl_->last_report->decoded_frames)
+                            .add("segments", static_cast<std::int64_t>(impl_->segment_index)));
+            return *impl_->last_report;
         }
         return FcError::INTERNAL_INVALID_STATE;
     }

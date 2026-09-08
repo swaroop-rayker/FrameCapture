@@ -24,7 +24,7 @@ and what it is missing cannot be supplied by writing a test: this rig has a sing
 endpoint, so `IMMNotificationClient` firing on a genuine device change needs a second
 audio device. Every other row has a named, passing test on the tier stated.
 
-Suite sizes the rows above were measured with: **CPU 434**, **GPU 199** (and 198 + 1
+Suite sizes the rows above were measured with: **CPU 434**, **GPU 200** (and 199 + 1
 skipped when the GPU tier is run as a single process, which is the stricter form — see
 `TESTING.md`), **pytest 312** hardware-free plus **17** engine-backed. Green on the
 release preset; the M9.5 figures were green on all three.
@@ -1586,6 +1586,123 @@ saying so.
 recovery path, and `test_overlay_pill.py` covers the widget's half, but no test kills an
 engine mid-finalize and watches what the GUI does. That is row 3's territory
 (`CrashRecoveryTest`) from the engine side; the GUI-side pairing is not written.
+
+## SPEC.md §20.1's chaos tier, and the one injection it does not perform
+
+§20.1 asks for *"randomized injection of `DEVICE_REMOVED`, `ACCESS_LOST`, audio
+discontinuity, disk stall, and queue saturation during a 30-minute run; assert the file is
+always valid."* `tests/chaos/test_chaos_injection.cpp` (gpu) is that tier. It is worth its
+own section because it is the only test in the suite whose assertion is the prime directive
+itself, and because it covers four of the five named injections rather than five.
+
+### Why it is not redundant with the single-fault rows
+
+Rows 9, 10 and 11 each establish that the pipeline recovers from one fault **starting from
+a healthy state**. None of them establishes that it recovers from a device loss arriving
+while the mux queue is already backed up behind a stalled disk, or from a second loss
+arriving during the rebuild from the first. Those states are unreachable by construction in
+a single-fault test, and they are the states a genuinely failing machine produces — a dying
+drive and a flaky driver are correlated far more often than they are independent.
+
+The tier deliberately injects `DEVICE_REMOVED` and `ACCESS_LOST` back to back as one of its
+outcomes, so the second lands mid-recovery. Whether `DeviceWatcher`'s settle window
+(BUG-035) turns that into one rebuild or two is not asserted — either is acceptable. What is
+asserted is that a file comes out.
+
+### What is injected, and what is not
+
+| §20.1 names | Here |
+|---|---|
+| `DEVICE_REMOVED` | **Injected**, via `RecordingSession::inject_device_error` — the seam a real `DXGI_ERROR_DEVICE_REMOVED` arrives at |
+| `ACCESS_LOST` | **Injected**, same seam, `DXGI_ERROR_ACCESS_LOST` |
+| disk stall | **Injected**, `SessionSettings::injected_stall_ns` — a real sleep on the real mux thread, the mechanism row 10 already uses |
+| queue saturation | **Consequential and asserted.** The stall backs the mux queue up and the encode queue overflows from behind, which is the path a failing drive produces. There is no separate seam because on real hardware there is no separate cause |
+| audio discontinuity | **NOT INJECTED — see below** |
+
+**Audio discontinuity has no test seam.** `AudioTimeline` injects silence when it *detects*
+a gap, but nothing lets a test *manufacture* one. Doing so needs an injection point in
+`LoopbackCapture` or a fake `IAudioClient` — engine work, not test work, and not written.
+The audio path is live during a chaos run, so a discontinuity the injected faults happen to
+cause would be caught; one that only a deliberate injection could produce is not.
+
+Recorded here rather than left to be discovered, because the file header claiming five
+injections while performing four is exactly the failure this document exists to prevent.
+
+### Two guards, both of which have fired
+
+A chaos run that injects nothing passes every assertion while proving nothing, and with a
+random schedule that is a live possibility rather than a hypothetical. Both guards below
+were added after the state they guard against actually occurred:
+
+- **`applied.empty()` fails the run.** Verified: `FC_CHAOS_SECONDS=1` produces a run whose
+  schedule draws no faults, and the tier fails with *"the schedule injected no faults; seed
+  228835351 produced a run this tier cannot draw a conclusion from"* rather than passing.
+- **Zero queue drops fails the run.** The first version stalled 120 ms every 24 writes and
+  measured **zero** drops — §20.1's queue saturation named in the header and absent from the
+  run. Sized up to 300 ms every 8 writes, taken from `test_slow_disk`'s measured figures.
+
+### Reproducibility, and BUG-056
+
+The seed is printed on every run, passing or failing, and `FC_CHAOS_SEED` replays it. That
+property is the entire justification for a randomised test — without it a failure is an
+anecdote — and **it was broken when written**: the reader used `std::atol`, `long` is
+32 bits on Windows, and every seed above 2147483647 saturated to `LONG_MAX`. Half of all
+seeds. The test printed an instruction that did not work.
+
+Fixed with a range-checked `strtoull`, and verified by running the same seed twice and
+comparing the schedules rather than by reading the code. See BUG-056; the lesson generalises
+past this file.
+
+### Status: the 30-minute form FAILS on an open defect
+
+**Read this before quoting the numbers below.** SPEC.md §20.1 specifies a 30-minute run.
+At that duration the tier **fails, reproducibly**, at seed `2991276637`:
+`RecordingSession::stop()` returns `INTERNAL_INVALID_STATE` after ~20 rebuilds — a segment
+rollover whose next segment could not be opened, leaving the engine unable to report a
+recording it had already finalized.
+
+That is **BUG-057, critical and open**, and it is a genuine prime-directive violation found
+by this tier on its first full-length run. The tier is doing its job; the engine is not
+passing it.
+
+So the tier's own status is honest only stated in two halves:
+
+| Form | Status |
+|---|---|
+| Routine, 30 s (what `ctest` runs) | **Green** |
+| §20.1's 30 min (what the spec asks for) | **Red — BUG-057** |
+
+`soak.yml` runs the 30-minute form weekly and is expected to be red until BUG-057 closes.
+
+### Measured
+
+Routine form, 30 s, seed 3402279752:
+
+| | |
+|---|---|
+| Faults injected | 3 (one of them a correlated `DEVICE_REMOVED + ACCESS_LOST` pair) |
+| Rebuilds | 3, all recorded as migrations |
+| Frames captured / encoded | 1781 / 897 |
+| Queue-dropped | **1514** — the saturation §20.1 names, actually happening |
+| File | **valid**, 1016 frames decoded, 31.70 s of video |
+
+That shape is the row-10 behaviour under duress and it is the point: the recording *got
+worse* — more than half the frames shed to keep up with a disk stalling 300 ms every eighth
+write — and it did not get *lost*.
+
+### What this tier does not cover
+
+- **Audio discontinuity**, above.
+- **The four-hour soak.** §20.1 lists them as separate tiers and this is the 30-minute one.
+  The soak is still unwritten and remains M10's.
+- **A fault during start-up or during finalization.** The schedule leaves two seconds of
+  healthy recording before the first fault, deliberately: a device loss during `start` is
+  row 1's territory and would make this tier's failures ambiguous. A fault during
+  `stop()` is not injected at all, and the GUI-side pairing for it is named as missing in
+  row 22's notes above.
+- **Any assertion about *how* it degraded.** Rung, gap and drop-ratio bounds belong to rows
+  10 and 11, which assert them precisely. This tier asserts only that a valid file exists,
+  because that is the one claim that has to survive every combination.
 
 ## Why the names differ
 

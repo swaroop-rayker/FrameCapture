@@ -15,6 +15,279 @@ graded deliverable, not a nicety.
 
 ---
 
+## [BUG-057] A failed segment rollover makes the engine disown a file it had already finalized
+
+**Severity:** Critical (prime-directive violation — a valid recording is reported to the user as lost)   **Found:** 2026-09-08   **Fixed:** _OPEN — two contributing defects fixed, firing cause not yet identified_   **Commit:** ffb17b7+
+
+### Symptom
+
+The chaos tier's first run at SPEC.md §20.1's specified 30-minute duration failed on its
+only hard assertion — the prime directive itself:
+
+```
+[ MEASURED ] 322 fault(s) injected over 1800 s
+[ MEASURED ] captured 5689, encoded 6364, queue-dropped 5278, rebuilds 20, migrations recorded 20
+test_chaos_injection.cpp(327): error: Value of: stopped.has_value()
+  Actual: false
+Expected: true
+the recording failed rather than degrading: INTERNAL_INVALID_STATE
+```
+
+`RecordingSession::stop()` returned an error instead of a `ValidationReport`. To every
+caller — including the GUI, which renders it as "Save failed" on the recording pill — the
+recording was lost.
+
+Seed `2991276637`, reproducible with `FC_CHAOS_SEED=2991276637 FC_CHAOS_SECONDS=1800`.
+
+### Investigation
+
+`INTERNAL_INVALID_STATE` has five sites in `recording_session.cpp`. `stop()`'s entry guard
+(`running.exchange(false)`) was ruled out first: `running` is set true in exactly one place
+and false in exactly one place, so a second `stop()` was the only way to reach it, and the
+test calls it once.
+
+That left `stop()`'s *second* guard, at line 859:
+
+```cpp
+if (!impl_->pipeline) {
+    if (impl_->settings.preview_only) { /* ...a report, not an error... */ }
+    return FcError::INTERNAL_INVALID_STATE;
+}
+```
+
+So the session reached `stop()` with **no pipeline**. One path leaves it that way — the
+migration-triggered segment rollover, when the rebuilt encoder's parameter sets differ:
+
+```cpp
+if (const Result<mux::ValidationReport> report = pipeline->stop(); !report.has_value()) { /* log */ }
+pipeline.reset();                                   // (2) pipeline is now null
+
+++segment_index;
+if (const Result<void> opened = open_pipeline(next); !opened.has_value()) {
+    FC_LOG_ERROR(..., "opening the next segment failed; the recording stops", ...);
+    stop_requested.store(true, std::memory_order_release);
+    return;                                         // (3) returns with pipeline still null
+}
+```
+
+Under 20 rebuilds against a disk stalling 300 ms every eighth write, `open_pipeline` failed
+once. From that moment the session had no pipeline, and `stop()` could only report an
+internal error.
+
+### What is proven
+
+Established by reading the code and confirmed by a second full-length run. These are
+facts, not the hypothesis below:
+
+1. **`pipeline == nullptr` at `stop()` has exactly one source.** `pipeline.reset()` appears
+   once in `recording_session.cpp` — in the migration-triggered segment rollover. So the
+   session reached `stop()` having rolled over and failed to open the next segment.
+2. **`VideoPipeline` never clears its own `running` flag.** Only its `stop()` does, so the
+   pipeline had not stopped itself before the rollover asked it to.
+3. **The routine 30 s form passes and the 1800 s form fails**, reproducibly, at seed
+   `2991276637`. The defect needs ~20 rebuilds; 30 seconds reaches three.
+
+### What was fixed, and why it was not enough
+
+Two real defects were found and corrected on the way. Neither is the one that fires.
+
+**`open_pipeline` installed a pipeline before starting it:**
+
+```cpp
+pipeline = std::make_unique<VideoPipeline>();   // installed as the live pipeline
+FC_TRY(pipeline->start(...));                   // ...then started
+```
+
+A failed start left a half-constructed pipeline installed as the live one — non-null, so
+every `if (pipeline)` in the file reads it as working, and unstarted, so
+`VideoPipeline::stop()` refuses it with `INTERNAL_INVALID_STATE`. Fixed: built into a local
+and installed only on success.
+
+**The rollover's `ValidationReport` was discarded.** The rollover finalizes and validates
+the current file, and that report was examined for failure and otherwise dropped. `Impl`
+now retains it in `last_report`, and `stop()` returns it when the pipeline is gone but a
+file was written.
+
+**The re-run at the same seed failed identically.** Same error, same 20 rebuilds, same
+counters. So neither defect above is the live cause.
+
+### The remaining hypothesis — NOT yet evidenced
+
+By elimination: `last_report` is only set when the rollover's `pipeline->stop()` *succeeds*.
+If that finalize returns an error — plausible with the device lost and the disk stalling
+300 ms every eighth write — the report is never retained, and `stop()` falls through to the
+same `INTERNAL_INVALID_STATE`.
+
+**This is a hypothesis and it is recorded as one.** Two earlier accounts of this bug read as
+confident and were wrong; the difference between the two above and this one is that this one
+has not been checked against evidence.
+
+### Why it was not checked
+
+The engine's own log was deleted before it could be read. The chaos fixture logged into its
+`TempDir`, and `TearDownTestSuite` removes that — so the run that failed took its own
+explanation with it, twice.
+
+Fixed for next time, and this is the durable lesson of the entry so far:
+
+- the chaos log now goes to `%TEMP%\framecapture-chaos-logs` and **survives the test**;
+- every `MigrationRecord` is printed — cause, `same_file`, `failed`, gap, output — so the
+  aggregate "20 rebuilds" becomes "which one rolled over, and what happened to it".
+
+A failure that costs thirty minutes to reproduce must leave its evidence behind. That should
+have been true before the first run, not after the second.
+
+### Fix
+
+**Open.** Two contributing defects fixed (above); the firing cause is not yet identified.
+The next step is one instrumented run at seed `2991276637`, which will produce the finalize
+error and the open error rather than another hypothesis.
+
+The contract question from the original entry stands and is the owner's: **what should
+`stop()` report after a rollover?** It reports on the current pipeline only. With segments
+the honest answer is the last segment's report plus the existence of earlier ones — and the
+migration path writes no `.segments.json` sidecar, unlike planned segmentation (§11).
+
+### An unexplained observation, recorded rather than pursued
+
+After the first failure the test process **printed its verdict and never exited**. It sat
+for half an hour; `Get-Process` listed it, `Stop-Process` reported no such process, and it
+held `fc_gpu_tests.exe` locked so the next link failed. Exited but unreapable — a thread
+stuck in a kernel call, which after 20 GPU device rebuilds under load points at the driver
+rather than at this code.
+
+Not investigated. It matters operationally: a chaos run that hangs on exit will wedge a CI
+runner, and `gpu.yml` has a 90-minute timeout that would not catch it quickly.
+
+### Regression test
+
+`ChaosTest.RandomisedFaultInjectionAlwaysYieldsAValidFile` at
+`FC_CHAOS_SECONDS=1800`, seed `2991276637`. It is the test that found it, it fails on the
+defect today, and it is the test that must go green.
+
+**The routine 30-second form passes**, which is exactly why this needed the spec's stated
+duration to surface: 20 rebuilds is where it lives, and a 30-second run reaches three.
+
+### Lessons
+
+1. **The chaos tier justified itself on its first full-length run.** Every fault here has a
+   deterministic single-fault test and every one of those is green. What none of them
+   reaches is the twentieth rebuild, and that is where the pipeline stops being able to
+   report.
+2. **Run the duration the spec states, not the duration that is convenient.** The routine
+   form is for iterating. It passed while a critical defect sat behind it.
+3. **A successful result that is discarded is a failure waiting to be reported.** The
+   `ValidationReport` from the finalized segment existed, was correct, and was thrown away
+   two lines before the code path that needed it.
+
+---
+
+## [BUG-056] The chaos tier's seed silently truncated, so half of all failures were unreproducible
+
+**Severity:** Major (in a test whose entire value rests on the property it broke)   **Found:** 2026-09-08   **Fixed:** 2026-09-08   **Commit:** _uncommitted_
+
+### Symptom
+
+`ChaosTest` prints its seed on every run so a failure can be replayed:
+
+```
+[ MEASURED ] chaos seed 3130200536 (re-run with FC_CHAOS_SEED=3130200536), 30 s, ...
+```
+
+Following that instruction did not replay it:
+
+```
+$env:FC_CHAOS_SEED="3130200536"
+[ MEASURED ] chaos seed 2147483647 (re-run with FC_CHAOS_SEED=2147483647), 30 s, ...
+```
+
+A different seed, a different fault schedule, and nothing anywhere saying the request had
+not been honoured.
+
+### Investigation
+
+`2147483647` is `LONG_MAX`, which named the cause immediately. The seed reader was:
+
+```cpp
+if (const long parsed = std::atol(raw); parsed > 0) {
+    return static_cast<unsigned>(parsed);
+}
+```
+
+`long` is **32 bits** on Windows — `LLP64`, unlike the LP64 model where this code would
+have been fine. `std::random_device` produces the full 32-bit *unsigned* range, so any
+seed above 2147483647 exceeds `LONG_MAX`, and `atol` saturates rather than failing.
+
+That is **half of the seed space**. A failing chaos run had a coin-flip chance of printing
+a seed that could not reproduce it.
+
+### Root cause
+
+Two defects, one line:
+
+1. **`long` cannot hold the value being parsed.** `std::random_device` is
+   `unsigned int` — 32 bits, max 4294967295. `long` on Windows tops out at 2147483647.
+2. **`atol` cannot report a failure.** It returns 0 on garbage and saturates on overflow,
+   and both are indistinguishable from a valid parse. clang-tidy's
+   `bugprone-unchecked-string-to-number-conversion` says exactly this, and it did flag the
+   sibling `atoi` in the same file — but only once the compile database was regenerated
+   after the new source file was added, which is CLAUDE.md §3's stale-database note
+   earning its keep for the second time (BUG-005 was the first).
+
+### Fix
+
+`std::strtoull`, with the end pointer checked and the value range-checked against
+`0xFFFFFFFF`:
+
+```cpp
+char* end = nullptr;
+const unsigned long long parsed = std::strtoull(raw, &end, 10);
+const bool complete = end != nullptr && *end == '\0' && end != raw;
+if (complete && parsed > 0 && parsed <= 0xFFFFFFFFull) {
+    return static_cast<unsigned>(parsed);
+}
+std::cout << "[ MEASURED ] FC_CHAOS_SEED=" << raw
+          << " is not a value in [1, 4294967295]; using a random seed instead\n";
+```
+
+A rejected seed now **says so** rather than quietly substituting one. The sibling
+`seconds_from_env` was moved from `atoi` to a checked `strtol` in the same change, for the
+same reason: a typo in `FC_CHAOS_SECONDS` silently became the 30-second default, so the
+30-minute run somebody thought they had asked for never happened.
+
+### Regression test
+
+Verified by measurement rather than by a new test case: two consecutive runs with
+`FC_CHAOS_SEED=3130200536` now produce an identical fault schedule —
+`DEVICE_REMOVED + ACCESS_LOST` at t+7.01, `DEVICE_REMOVED` at t+12.02, `ACCESS_LOST` at
+t+14.53, and two more correlated pairs at t+24.54 and t+27.05 — and that schedule matches
+the one the original random run at that seed produced. Before the fix the same command ran
+seed 2147483647.
+
+There is no automated case, and that is a stated gap rather than an oversight: asserting it
+means running the tier twice, which is 80 seconds of GPU time to check a property that a
+one-line reader either has or does not. The check belongs in the review of any change to
+`seed_from_env`, and the comment there says so.
+
+### Lessons
+
+1. **A reproducibility feature has to be reproduced, not read.** The code looked right, the
+   output looked right, and the instruction it printed was wrong. Nothing short of
+   following the instruction would have found it — the same shape as M9.6's lesson about
+   rendering the widget and looking at it.
+2. **`long` is 32 bits on Windows.** `atol`, `strtol` and `%ld` are all narrower here than
+   the habits formed on Linux expect, and a value from `std::random_device`,
+   `GetTickCount64` or a file size will exceed it. This is the second time in this project
+   a width assumption produced nonsense from a clock-adjacent value (BUG-019 was a QPC
+   overflow).
+3. **A chaos test's non-vacuity guards are worth as much as its assertions.** The same
+   session found the tier reporting green while injecting nothing detectable — 120 ms of
+   stall every 24 writes produced **zero** queue drops, so §20.1's "queue saturation" was
+   named in the file header and absent from the run. Both were caught by asking what the
+   numbers actually said rather than what the test reported.
+
+---
+
 ## [BUG-055] Four menu tests failed together, then passed, because they read the real Windows clipboard
 
 **Severity:** Minor in effect, major in kind (an intermittently red suite is a suite nobody trusts)   **Found:** 2026-09-06   **Fixed:** 2026-09-06   **Commit:** _uncommitted_

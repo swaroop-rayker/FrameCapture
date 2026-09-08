@@ -139,6 +139,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Restarting the engine has moved from File to Tools → Engine, alongside recovery. Help →
   About now shows the recorder's version as well as the interface's.
 
+- **Chaos testing (M10).** A new test tier that breaks things on purpose: it injects
+  graphics-driver failures and disk stalls at random, in random combinations, while a
+  recording is running, and then checks the only thing that really matters — that a
+  valid, playable file still came out.
+
+  Every other test in the suite breaks one thing at a time, starting from a working
+  state. This one breaks several at once, including a second driver failure arriving
+  while the recorder is still recovering from the first, and it does so on a disk that
+  is already stalling. Those are the situations a genuinely failing machine produces,
+  and nothing had tested them together before.
+
+  Measured over a 30-second run: three driver faults, three recoveries, 1,514 frames
+  shed to keep up with the stalled disk — and a valid file holding 1,016 frames and 31.7
+  seconds of video. The recording gets worse under duress, exactly as designed, and it
+  does not get lost.
+
 - **Four new entries in the project's failure-mode matrix (M9.6 Phase 6).** The
   specification carries a table of every way this recorder is known to be able to fail,
   each with a named automated test, and shipping requires every row green. This release

@@ -151,6 +151,10 @@ add_executable(fc_gpu_tests
     integration/test_segmentation.cpp
     integration/test_video_encode_mkv.cpp
     integration/test_watchdog_recovery.cpp
+    # SPEC.md §20.1's chaos tier. On the GPU target because randomised fault injection
+    # against anything but the real encode-and-mux chain proves nothing -- the claim is
+    # the prime directive, and a mock cannot fail to produce a file the way hardware can.
+    chaos/test_chaos_injection.cpp
 )
 
 target_include_directories(fc_gpu_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")

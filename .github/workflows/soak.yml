@@ -10,6 +10,7 @@
 # | FC_LOOPBACK_SECONDS     | test_loopback_recording     | 12      | 1800   |
 # | FC_SUSTAINED_SECONDS    | test_sustained_60fps        | 20      | 600    |
 # | FC_MULTITRACK_SECONDS   | test_multitrack row 14      | 20      | 1800   |
+# | FC_CHAOS_SECONDS        | ChaosTest                   | 30      | 1800   |
 #
 # `FC_LOOPBACK_SECONDS` and `FC_SUSTAINED_SECONDS` are real time; `FC_MULTITRACK_SECONDS`
 # runs on a synthetic clock and takes about 376 s of wall time for its 1800.
@@ -57,6 +58,18 @@ jobs:
       FC_LOOPBACK_SECONDS: '1800'
       FC_SUSTAINED_SECONDS: '600'
       FC_MULTITRACK_SECONDS: '1800'
+      # SPEC.md §20.1 specifies the chaos tier as a 30-minute run. The routine 30 s form
+      # proves the mechanism; this is the duration the spec asks for.
+      #
+      # *** THIS JOB IS EXPECTED TO FAIL until BUG-057 is closed. ***
+      #
+      # The 30-minute form reproducibly fails at seed 2991276637 with
+      # `stop()` -> INTERNAL_INVALID_STATE after ~20 rebuilds: a segment rollover whose
+      # next segment could not be opened, leaving the engine unable to report a recording
+      # it had already finalized. It is red because a critical open defect should be red,
+      # not because the workflow is broken -- see ENGINEERING_LOG.md BUG-057 before
+      # spending time on it.
+      FC_CHAOS_SECONDS: '1800'
     steps:
       - name: Normalise line endings before checkout
         shell: pwsh
